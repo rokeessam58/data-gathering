@@ -1,0 +1,4 @@
+# 로컬 작업용 (배포하지 않음)
+.claude/
+project/
+config.js
