@@ -4,12 +4,17 @@ const TYPE_LABELS = {
   text: '짧은 글', textarea: '긴 글', number: '숫자', date: '날짜', tel: '전화번호', email: '이메일', select: '드롭다운',
 };
 const PW_KEY = 'dg_admin_pw';
+const ID_KEY = 'dg_admin_id';
+// 아이디가 틀렸을 때와 비밀번호가 틀렸을 때 같은 문구를 써서, 어느 쪽이 틀렸는지 화면 문구로는 알 수 없게 한다.
+const LOGIN_FAIL_MSG = '아이디 또는 비밀번호가 일치하지 않습니다. 다시 입력해주세요.';
+const ADMIN_ID_RE = /^[a-z0-9]{4,20}$/; // Code.gs 의 checkAdminId_ 와 같은 규칙
+const ADMIN_ID_RULE = '영어 소문자와 숫자만 사용해 4~20자로 정해 주세요';
+function clearSession() { sessionStorage.removeItem(PW_KEY); sessionStorage.removeItem(ID_KEY); }
 const LOADING_LABELS = {
   submit: '제출하는 중이에요', saveForm: '저장하는 중이에요', setOpen: '바꾸는 중이에요',
   deleteForm: '삭제하는 중이에요', deleteRow: '삭제하는 중이에요',
   setPassword: '비밀번호를 설정하는 중이에요', login: '로그인하는 중이에요',
 };
-const LOCK_MINUTES = 5;       // 로그인 잠금 시간 안내용 (Code.gs 의 LOCK_MINUTES 와 같은 값)
 const SLOW_AFTER_MS = 6000;   // 이 시간이 지나도 응답이 없으면 "서버를 깨우는 중" 안내를 덧붙인다.
 const SHOW_AFTER_MS = 200;    // 아주 빠른 응답에는 로딩 창이 깜빡이지 않도록 잠깐 기다린다.
 
@@ -137,7 +142,8 @@ function loadProfile() {
     const url = parseBackend(p.url);
     // ownerSet: 서버에 요구자 정보(이름 또는 비공개 설정)가 이미 있는지. 이전 버전 저장분은 이름/비공개가 있으면 입력된 것으로 본다.
     const ownerSet = typeof p.ownerSet === 'boolean' ? p.ownerSet : !!p.name || !!p.hidden;
-    return url ? { url, name: String(p.name || ''), hidden: !!p.hidden, ownerSet } : null;
+    // idSet: 서버에 관리자 아이디가 이미 있는지. 있으면 로그인에 아이디가 필요하다.
+    return url ? { url, name: String(p.name || ''), hidden: !!p.hidden, ownerSet, idSet: p.idSet === true } : null;
   } catch (e) { return null; }
 }
 
@@ -148,10 +154,20 @@ function writeProfile(p) {
 }
 
 // 주소가 바뀌면 이름·비공개 설정은 새 서버의 것이 아니므로 비운다. ownerSet 은 방금 서버에 물어본 값이 있으면 그것을 따른다.
-function saveBackend(url, ownerSet) {
+function saveBackend(url, ownerSet, idSet) {
   const old = loadProfile();
-  const base = old && old.url === url ? old : { url, name: '', hidden: false, ownerSet: false };
-  writeProfile({ ...base, ownerSet: typeof ownerSet === 'boolean' ? ownerSet : base.ownerSet });
+  const base = old && old.url === url ? old : { url, name: '', hidden: false, ownerSet: false, idSet: false };
+  writeProfile({
+    ...base,
+    ownerSet: typeof ownerSet === 'boolean' ? ownerSet : base.ownerSet,
+    idSet: typeof idSet === 'boolean' ? idSet : base.idSet,
+  });
+}
+
+// 서버가 알려 준 "아이디 설정 여부"를 반영한다.
+function saveIdSet(idSet) {
+  const p = loadProfile();
+  if (p && typeof idSet === 'boolean' && p.idSet !== idSet) writeProfile({ ...p, idSet });
 }
 
 // 요구자 정보가 서버에 저장되었음을 이 브라우저에 기억한다. (이름이나 비공개 설정이 있을 때만)
@@ -185,13 +201,15 @@ async function rawApi(action, payload) {
   const url = backendUrl;
   if (!url) throw new Error('연결된 서버 정보가 없습니다. 관리자에게 받은 링크로 다시 접속해 주세요.');
   // 관리자 비밀번호는 관리자가 직접 저장한 주소로만 보낸다.
-  const password = url === storedBackend() ? sessionStorage.getItem(PW_KEY) || '' : '';
+  const mine = url === storedBackend();
+  const password = mine ? sessionStorage.getItem(PW_KEY) || '' : '';
+  const adminId = mine ? sessionStorage.getItem(ID_KEY) || '' : '';
   let res;
   try {
     res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // preflight 회피
-      body: JSON.stringify({ action, password, ...payload }),
+      body: JSON.stringify({ action, adminId, password, ...payload }),
     });
   } catch (e) {
     throw new Error('서버에 연결하지 못했습니다. 네트워크와 배포 설정(액세스: 모든 사용자)을 확인하세요.');
@@ -200,17 +218,16 @@ async function rawApi(action, payload) {
   try { json = await res.json(); } catch (e) { throw new Error('서버 응답을 해석하지 못했습니다. 배포 URL을 확인하세요.'); }
   if (!json.ok) {
     const err = String(json.error || '');
-    // 서버가 비밀번호 오류를 'AUTH' 또는 'AUTH:남은횟수', 로그인 잠금을 'LOCKED:남은초'로 알려 준다.
-    const auth = /^AUTH(?::(\d+))?$/.exec(err);
-    if (auth) {
+    // 서버가 아이디 또는 비밀번호 오류를 'AUTH'(어느 쪽이 틀렸는지 구분하지 않음), 로그인 잠금을 'LOCKED:남은초'로 알려 준다.
+    // (이전 버전 서버가 보내는 'AUTH:남은횟수'도 같은 문구로 처리하고 횟수는 보여주지 않는다)
+    if (/^AUTH(?::\d+)?$/.test(err)) {
       // 마이페이지처럼 비밀번호를 직접 넣어 보낸 요청이 틀린 경우에는 기존 로그인 상태를 지우지 않는다.
-      if (!(payload && 'password' in payload)) sessionStorage.removeItem(PW_KEY);
-      const left = auth[1];
-      throw Object.assign(new Error('관리자 비밀번호가 올바르지 않습니다.' + (left !== undefined ? ` (${left}번 더 틀리면 ${LOCK_MINUTES}분 동안 잠겨요)` : '')), { auth: true });
+      if (!(payload && 'password' in payload)) clearSession();
+      throw Object.assign(new Error(LOGIN_FAIL_MSG), { auth: true });
     }
     const locked = /^LOCKED:(\d+)$/.exec(err);
     if (locked) {
-      sessionStorage.removeItem(PW_KEY);
+      clearSession();
       const sec = Number(locked[1]);
       const wait = sec < 60 ? `${sec}초` : sec % 60 === 0 ? `${sec / 60}분` : `${Math.floor(sec / 60)}분 ${sec % 60}초`;
       throw Object.assign(new Error(`비밀번호를 여러 번 틀려서 로그인이 잠겼어요. ${wait} 뒤에 다시 시도해 주세요.`), { auth: true, locked: true });
@@ -315,11 +332,11 @@ function codeGsUrl() {
 }
 
 // 입력한 주소가 실제로 이 앱의 서버(Code.gs)인지, 관리자 비밀번호가 이미 정해져 있는지 확인한다.
-// 돌려주는 값: { problem: 안내 문구 | null, passwordSet: true | false, ownerSet: true | false }
-// (ownerSet: 자료 요구자 이름 또는 비공개 설정이 서버에 이미 있는지)
+// 돌려주는 값: { problem: 안내 문구 | null, passwordSet, idSet, ownerSet }  (모두 true | false)
+// (idSet: 관리자 아이디가 서버에 이미 있는지 / ownerSet: 자료 요구자 이름 또는 비공개 설정이 서버에 이미 있는지)
 async function verifyBackend(url) {
   const notApp = '이 주소는 자료 수합 서버로 응답하지 않아요. 배포한 웹 앱 주소(…/exec)가 맞는지 확인해 주세요.';
-  const fail = (problem) => ({ problem, passwordSet: true, ownerSet: true });
+  const fail = (problem) => ({ problem, passwordSet: true, idSet: false, ownerSet: true });
 
   async function call(action) {
     const ctrl = new AbortController();
@@ -348,7 +365,7 @@ async function verifyBackend(url) {
   if (st.json.ok) {
     const d = st.json.data;
     return d && typeof d.passwordSet === 'boolean'
-      ? { problem: null, passwordSet: d.passwordSet, ownerSet: d.ownerSet === true } // 이전 서버는 ownerSet 을 모르므로 입력받는 쪽(false)으로 둔다
+      ? { problem: null, passwordSet: d.passwordSet, idSet: d.idSet === true, ownerSet: d.ownerSet === true } // 이전 서버는 idSet·ownerSet 을 모르므로 false 로 둔다
       : fail(notApp);
   }
   if (!/알 수 없는 요청/.test(st.json.error || '')) return fail('서버가 오류를 돌려줬어요: ' + st.json.error);
@@ -362,7 +379,7 @@ async function verifyBackend(url) {
       : '서버가 오류를 돌려줬어요: ' + old.json.error);
   }
   const forms = Array.isArray(old.json.data) ? old.json.data : old.json.data && old.json.data.forms;
-  return Array.isArray(forms) ? { problem: null, passwordSet: true, ownerSet: false } : fail(notApp);
+  return Array.isArray(forms) ? { problem: null, passwordSet: true, idSet: false, ownerSet: false } : fail(notApp);
 }
 
 // 이 탭에서 "비밀번호를 처음 정해야 하는 서버"임을 기억한다. (주소 저장 후 화면이 다시 열려도 유지)
@@ -387,8 +404,8 @@ function renderSetup(msg, entered) {
         const stop = showLoading('서버를 확인하는 중이에요');
         const result = await verifyBackend(parsed).finally(stop);
         if (result.problem) return renderSetup(result.problem, url.value);
-        saveBackend(parsed, result.ownerSet);
-        sessionStorage.removeItem(PW_KEY);
+        saveBackend(parsed, result.ownerSet, result.idSet);
+        clearSession();
         // 서버에 관리자 비밀번호가 아직 없으면, 다음 화면에서 최초 1회 설정을 받는다.
         if (result.passwordSet) sessionStorage.removeItem(NEEDS_PW_KEY); else sessionStorage.setItem(NEEDS_PW_KEY, '1');
         location.href = BASE + '?admin';
@@ -413,7 +430,7 @@ let ownerDraft = null; // 로그인에 실패해 화면이 다시 그려져도 �
 // 서버 응답을 {forms, owner} 로 통일한다. (이전 서버는 양식 배열만 돌려준다)
 function normalizeDash(res) {
   if (Array.isArray(res)) { const p = loadProfile(); return { forms: res, owner: p ? { name: p.name, hidden: p.hidden } : null }; }
-  if (res && Array.isArray(res.forms)) return { forms: res.forms, owner: res.owner || null };
+  if (res && Array.isArray(res.forms)) return { forms: res.forms, owner: res.owner || null, idSet: res.idSet };
   return null;
 }
 
@@ -443,26 +460,42 @@ function ownerFields(id, initial) {
   return { node, nameIn, hiddenChk, value: () => ({ name: nameIn.value.trim().replace(/\s*선생님$/, ''), hidden: hiddenChk.checked }) };
 }
 
+let idDraft = ''; // 로그인에 실패해도 입력하던 아이디는 유지한다. (비밀번호는 유지하지 않는다)
+
+function idField(id, label, hint, value, placeholder, autocomplete) {
+  const input = h('input', {
+    id, value, placeholder, autocomplete, autocapitalize: 'none', spellcheck: 'false', maxlength: '20', required: true,
+  });
+  return { input, node: h('label', { class: 'field' }, label, hint ? h('span', { class: 'hint' }, hint) : '', input) };
+}
+
 function renderGate(msg) {
   if (!backendUrl) return renderSetup();
   const firstTime = sessionStorage.getItem(NEEDS_PW_KEY) === '1'; // 비밀번호를 처음 정하는 화면인가
-  const prof = loadProfile() || { name: '', hidden: false, ownerSet: false };
+  const prof = loadProfile() || { name: '', hidden: false, ownerSet: false, idSet: false };
   // 서버에 요구자 정보가 아직 없을 때만 이름을 입력받는다. (이름 없이 비공개만 설정된 경우도 이미 입력된 것)
   const askOwner = !prof.ownerSet;
   const owner = askOwner ? ownerFields('owner-name', ownerDraft || { name: prof.name, hidden: prof.hidden }) : null;
+  // 아이디 칸: 처음 정할 때, 또는 서버에 아이디가 이미 있을 때. (아이디가 없는 서버는 로그인 뒤에 정하게 한다)
+  const askId = firstTime || prof.idSet;
+  const idf = askId
+    ? idField('admin-id', firstTime ? '사용할 아이디 입력' : '아이디',
+      firstTime ? '영어 소문자와 숫자 4~20자 · 한 번 정하면 바꿀 수 없어요' : '',
+      idDraft, firstTime ? '영어 소문자·숫자 4~20자' : '아이디', firstTime ? 'off' : 'username')
+    : null;
   const pw = h('input', {
     type: 'password', autocomplete: firstTime ? 'new-password' : 'current-password', required: true,
     placeholder: firstTime ? `새 비밀번호 (${MIN_PW_LEN}자 이상)` : '관리자 비밀번호',
   });
   const pw2 = firstTime ? h('input', { type: 'password', autocomplete: 'new-password', placeholder: '새 비밀번호를 한 번 더 입력', required: true }) : null;
 
-  // 입력한 비밀번호로 로그인(비밀번호 확인 + 요구자 저장(처음만) + 양식 목록·요구자 조회, 요청 1회)
+  // 입력한 아이디·비밀번호로 로그인(확인 + 요구자 저장(처음만) + 양식 목록·요구자 조회, 요청 1회)
   async function login(ownerValue) {
     try {
       const res = await api('login', { ...(ownerValue || {}), withOwner: true });
       const dash = normalizeDash(res);
       if (dash && !Array.isArray(res)) prefetched = dash; // 이전 서버가 배열만 주면 대시보드가 직접 다시 조회한다
-      if (dash) rememberOwner(dash.owner);
+      if (dash) { rememberOwner(dash.owner); saveIdSet(dash.idSet); }
       if (ownerValue) {
         saveOwnerProfile(ownerValue.name, ownerValue.hidden);
         if (!dash || Array.isArray(res)) toast('서버 코드(Code.gs)를 새 버전으로 배포하면 요구자 이름이 선생님께 표시됩니다.');
@@ -476,6 +509,7 @@ function renderGate(msg) {
       return renderGate(err.message);
     }
     ownerDraft = null;
+    idDraft = '';
     sessionStorage.removeItem(NEEDS_PW_KEY);
     renderDashboard();
   }
@@ -483,42 +517,75 @@ function renderGate(msg) {
   mount(h('h1', {}, '자료 수합 관리'),
     firstTime ? h('div', { class: 'card notice' },
       h('strong', {}, '처음 한 번만 설정해 주세요'),
-      h('p', { class: 'muted' }, '이 서버에는 아직 관리자 비밀번호가 없어요. 아래에서 비밀번호를 정하면 다음부터 이 비밀번호로 로그인합니다. 잊어버리지 않게 기억해 두세요.')) : '',
+      h('p', { class: 'muted' }, '이 서버에는 아직 관리자 아이디와 비밀번호가 없어요. 아래에서 정하면 다음부터 이 아이디와 비밀번호로 로그인합니다. 아이디는 한 번 정하면 바꿀 수 없고, 잊어버리지 않게 기억해 두세요.')) : '',
     h('form', {
       class: 'card',
       novalidate: true,
       onsubmit: async (e) => {
         e.preventDefault();
         if (firstTime) {
-          // 길이와 일치 여부는 직접 검사해 입력칸 아래에 안내한다.
+          // 규칙과 일치 여부는 직접 검사해 입력칸 아래에 안내한다.
+          idf.input.setCustomValidity(ADMIN_ID_RE.test(idf.input.value) ? '' : ADMIN_ID_RULE);
           pw.setCustomValidity(pw.value.length < MIN_PW_LEN || !/\S/.test(pw.value) ? `비밀번호는 ${MIN_PW_LEN}자 이상으로 정해 주세요` : '');
           pw2.setCustomValidity(pw2.value && pw2.value !== pw.value ? '비밀번호가 서로 달라요. 다시 확인해 주세요' : '');
         }
         if (!validateForm(e.target)) return;
         const ownerValue = owner ? owner.value() : null;
         ownerDraft = ownerValue; // 실패해도 입력값 유지
+        idDraft = idf ? idf.input.value : '';
         if (firstTime) {
           try {
-            await api('setPassword', { password: pw.value });
+            await api('setCredentials', { adminId: idf.input.value, password: pw.value });
           } catch (err) {
             if (/이미 관리자 비밀번호/.test(err.message)) { // 그 사이 다른 곳에서 이미 정해진 경우
               sessionStorage.removeItem(NEEDS_PW_KEY);
-              return renderGate('이미 관리자 비밀번호가 정해져 있어요. 정해 둔 비밀번호로 로그인해 주세요.');
+              return renderGate('이미 관리자 비밀번호가 정해져 있어요. 정해 둔 아이디와 비밀번호로 로그인해 주세요.');
             }
             return renderGate(err.message);
           }
-          toast('관리자 비밀번호를 설정했어요');
+          saveIdSet(true);
+          toast('관리자 아이디와 비밀번호를 설정했어요');
         }
+        if (idf) sessionStorage.setItem(ID_KEY, idf.input.value); else sessionStorage.removeItem(ID_KEY);
         sessionStorage.setItem(PW_KEY, pw.value);
         await login(ownerValue);
       },
     },
     owner ? owner.node : '',
+    idf ? idf.node : '',
     h('label', { class: 'field' }, firstTime ? '사용할 비밀번호 입력' : '관리자 비밀번호', pw),
     pw2 ? h('label', { class: 'field' }, '비밀번호 확인', pw2) : '',
     msg ? h('div', { class: 'err block', role: 'alert' }, msg) : '',
-    h('button', { class: 'primary', type: 'submit' }, firstTime ? '비밀번호 정하고 시작하기' : '로그인')),
+    h('button', { class: 'primary', type: 'submit' }, firstTime ? '등록하기' : '로그인')),
     h('p', { class: 'muted' }, '연결된 서버: …' + backendRef(backendUrl).slice(-8) + ' · ', h('a', { href: '#', onclick: (e) => { e.preventDefault(); renderSetup(); } }, '변경')));
+}
+
+// 아이디가 없는 서버(이전 버전에서 만든 서버)에 로그인한 관리자가 아이디를 최초 1회 정하는 화면. 정하기 전에는 관리 화면을 쓸 수 없다.
+function renderSetAdminId() {
+  const a = idField('new-admin-id', '사용할 아이디 입력', '영어 소문자와 숫자 4~20자 · 한 번 정하면 바꿀 수 없어요', '', '영어 소문자·숫자 4~20자', 'off');
+  const b = idField('new-admin-id2', '아이디 확인', '', '', '아이디를 한 번 더 입력', 'off');
+  mount(h('h1', {}, '아이디를 정해 주세요'),
+    h('div', { class: 'card notice' },
+      h('strong', {}, '처음 한 번만 설정해 주세요'),
+      h('p', { class: 'muted' }, '이 서버에는 아직 관리자 아이디가 없어요. 이제부터 로그인할 때 아이디와 비밀번호가 모두 필요해요. 아이디는 한 번 정하면 바꿀 수 없으니 신중하게 정해 주세요.')),
+    h('form', {
+      class: 'card',
+      novalidate: true,
+      onsubmit: (e) => {
+        e.preventDefault();
+        a.input.setCustomValidity(ADMIN_ID_RE.test(a.input.value) ? '' : ADMIN_ID_RULE);
+        b.input.setCustomValidity(b.input.value && b.input.value !== a.input.value ? '아이디가 서로 달라요. 다시 확인해 주세요' : '');
+        if (!validateForm(e.target)) return;
+        guard(async () => {
+          await api('setAdminId', { newAdminId: a.input.value });
+          sessionStorage.setItem(ID_KEY, a.input.value); // 이후 요청부터 아이디를 함께 보낸다
+          saveIdSet(true);
+          toast('아이디를 정했어요');
+          await renderDashboard();
+        });
+      },
+    }, a.node, b.node, h('button', { class: 'primary', type: 'submit' }, '아이디 정하기')),
+    h('p', { class: 'muted' }, h('a', { href: '#', onclick: (e) => { e.preventDefault(); clearSession(); renderGate(); } }, '로그아웃')));
 }
 // ---------- 관리자: 대시보드 ----------
 
@@ -544,6 +611,8 @@ async function renderDashboard() {
     }
   }
   const { forms, owner } = dash;
+  saveIdSet(dash.idSet);
+  if (dash.idSet === false) return renderSetAdminId(); // 서버에 아이디가 없으면 먼저 정하게 한다 (이전 서버는 idSet 을 주지 않아 해당 없음)
   rememberOwner(owner);
   const greeting = owner && owner.name ? `${owner.name} 선생님, 안녕하세요!` : '안녕하세요!';
 
@@ -587,7 +656,7 @@ function adminMenu() {
   const entries = [
     ['마이페이지', () => openMyPage()],
     ['서버 변경', () => renderSetup()],
-    ['로그아웃', () => { sessionStorage.removeItem(PW_KEY); renderGate(); }],
+    ['로그아웃', () => { clearSession(); renderGate(); }],
   ];
   const items = entries.map(([label, run]) => h('button', { class: 'menu-item', type: 'button', role: 'menuitem', onclick: () => { close(); run(); } }, label));
   wrap.append(btn, h('div', { class: 'menu-panel', role: 'menu' }, h('div', { class: 'menu-card' }, items)));
@@ -644,14 +713,16 @@ async function openMyPage() {
     verify: async (password) => {
       try { return await api('me', { password }); } catch (err) {
         if (/알 수 없는 요청/.test(err.message)) throw new Error('서버 코드(Code.gs)가 오래된 버전이라 마이페이지를 쓸 수 없어요. 새 버전으로 배포해 주세요.');
+        // 이 창은 비밀번호만 다시 묻는 곳이라, 아이디까지 언급하는 로그인 문구 대신 비밀번호 기준으로 안내한다.
+        if (err.auth && !err.locked) throw new Error('비밀번호가 올바르지 않아요.');
         throw err;
       }
     },
   });
-  if (res) renderMyPage(res.owner);
+  if (res) renderMyPage(res.owner, res.adminId);
 }
 
-function renderMyPage(serverOwner) {
+function renderMyPage(serverOwner, adminId) {
   const owner = ownerFields('my-owner-name', { name: (serverOwner && serverOwner.name) || '', hidden: !!(serverOwner && serverOwner.hidden) });
   const preview = h('div', { class: 'muted' });
   const refreshPreview = () => {
@@ -667,6 +738,10 @@ function renderMyPage(serverOwner) {
 
   mount(
     h('div', { class: 'row between' }, h('h1', {}, '마이페이지'), h('button', { onclick: () => renderDashboard() }, '← 돌아가기')),
+    adminId ? h('div', { class: 'card' },
+      h('h2', {}, '로그인 정보'),
+      h('div', {}, '아이디 ', h('b', {}, adminId)),
+      h('div', { class: 'muted' }, '아이디는 한 번 정하면 바꿀 수 없어요.')) : '',
     h('form', {
       class: 'card',
       novalidate: true,

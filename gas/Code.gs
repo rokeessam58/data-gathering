@@ -11,7 +11,7 @@ const FORMS_SHEET = '_forms';
 const FORMS_HEADER = ['id', 'title', 'description', 'fields', 'open', 'created', 'listed', 'sheetId'];
 const TS_LABEL = '제출시각';
 const TYPES = ['text', 'textarea', 'number', 'date', 'tel', 'email', 'select'];
-const PUBLIC_ACTIONS = ['listPublic', 'getForm', 'submit', 'status', 'setPassword'];
+const PUBLIC_ACTIONS = ['listPublic', 'getForm', 'submit', 'status', 'setPassword', 'setCredentials'];
 const MIN_PASSWORD_LEN = 8;
 const MAX_LEN = 2000;
 // 로그인 잠금: 서버 전체에 하나의 잠금을 건다. (웹 앱은 요청한 기기/IP를 알 수 없다)
@@ -29,7 +29,7 @@ function doPost(e) {
     const lock = LockService.getScriptLock();
     lock.waitLock(20000);
     try {
-      if (PUBLIC_ACTIONS.indexOf(req.action) < 0) checkAdmin_(req.password);
+      if (PUBLIC_ACTIONS.indexOf(req.action) < 0) checkAdmin_(req.adminId, req.password);
       return out_({ ok: true, data: route_(req) });
     } finally {
       lock.releaseLock();
@@ -45,7 +45,8 @@ function out_(obj) {
 
 // 관리자 비밀번호 상태 (웹앱이 서버 주소를 저장할 때 첫 설정이 필요한지 확인하는 데 쓴다)
 function status_() {
-  return { passwordSet: !!PropertiesService.getScriptProperties().getProperty('ADMIN_PASSWORD'), ownerSet: ownerSet_() };
+  const p = PropertiesService.getScriptProperties();
+  return { passwordSet: !!p.getProperty('ADMIN_PASSWORD'), idSet: !!p.getProperty('ADMIN_ID'), ownerSet: ownerSet_() };
 }
 
 // 최초 1회 설정: 비밀번호가 아직 없을 때만 허용한다. 한 번 설정되면 웹에서는 바꿀 수 없다.
@@ -54,6 +55,32 @@ function setPassword_(password) {
   const props = PropertiesService.getScriptProperties();
   if (props.getProperty('ADMIN_PASSWORD')) throw new Error('이미 관리자 비밀번호가 설정되어 있습니다.');
   props.setProperty('ADMIN_PASSWORD', checkNewPassword_(password));
+  return true;
+}
+
+// 아이디: 영어 소문자와 숫자만, 4~20자. 스크립트 속성 ADMIN_ID 에 저장되며 한 번 정하면 웹에서는 절대 바꿀 수 없다.
+function checkAdminId_(id) {
+  const v = String(id == null ? '' : id);
+  if (!/^[a-z0-9]{4,20}$/.test(v)) throw new Error('아이디는 영어 소문자와 숫자만 사용해 4~20자로 정해 주세요.');
+  return v;
+}
+
+// 최초 1회 설정(아이디 + 비밀번호): 비밀번호가 아직 없을 때만 허용한다.
+// 아이디가 이미 있으면 덮어쓰지 않고 그대로 둔다.
+function setCredentials_(adminId, password) {
+  const props = PropertiesService.getScriptProperties();
+  if (props.getProperty('ADMIN_PASSWORD')) throw new Error('이미 관리자 비밀번호가 설정되어 있습니다.');
+  const pw = checkNewPassword_(password);
+  const id = props.getProperty('ADMIN_ID') || checkAdminId_(adminId);
+  props.setProperties({ ADMIN_PASSWORD: pw, ADMIN_ID: id });
+  return true;
+}
+
+// 아이디가 없는 서버(이전 버전에서 만든 서버)에서 로그인한 관리자가 최초 1회만 설정한다. 이미 있으면 거부한다.
+function setAdminId_(newAdminId) {
+  const props = PropertiesService.getScriptProperties();
+  if (props.getProperty('ADMIN_ID')) throw new Error('아이디는 한 번 설정하면 변경할 수 없습니다.');
+  props.setProperty('ADMIN_ID', checkAdminId_(newAdminId));
   return true;
 }
 
@@ -73,11 +100,12 @@ function changePassword_(newPassword) {
   return true;
 }
 
-// 관리자 비밀번호 확인 + 로그인 잠금. 오류 문구 규칙(웹앱이 해석함):
-//   'AUTH:남은횟수'  비밀번호가 틀림
-//   'LOCKED:남은초'  잠금 중 (이 동안에는 맞는 비밀번호도 거부한다. 그렇지 않으면 잠금 중에도 추측이 가능하다)
+// 관리자 아이디·비밀번호 확인 + 로그인 잠금. 오류 문구 규칙(웹앱이 해석함):
+//   'AUTH'           아이디 또는 비밀번호가 틀림. 어느 쪽이 틀렸는지 응답으로는 알 수 없게 둘을 똑같이 돌려준다.
+//                    (아이디가 맞고 비밀번호가 틀린 경우에만 실패 횟수를 센다. 아이디가 틀린 시도는 세지 않는다)
+//   'LOCKED:남은초'  잠금 중 (이 동안에는 맞는 아이디·비밀번호도 거부한다. 그렇지 않으면 잠금 중에도 추측이 가능하다)
 // doPost의 스크립트 잠금 안에서 호출되므로 횟수 갱신이 겹치지 않는다.
-function checkAdmin_(password) {
+function checkAdmin_(adminId, password) {
   const props = PropertiesService.getScriptProperties();
   const real = props.getProperty('ADMIN_PASSWORD');
   if (!real) throw new Error('관리자 비밀번호가 아직 설정되지 않았습니다.');
@@ -85,6 +113,13 @@ function checkAdmin_(password) {
   const now = Date.now();
   const lockedUntil = Number(props.getProperty('LOCK_UNTIL') || 0);
   if (lockedUntil > now) throw new Error('LOCKED:' + Math.ceil((lockedUntil - now) / 1000)); // 잠금 중 시도는 잠금 시간을 늘리지 않는다
+
+  // 아이디가 정해져 있으면 먼저 확인한다. (아이디가 없는 서버 = 이전 버전에서 만든 서버는 비밀번호만 확인)
+  const realId = props.getProperty('ADMIN_ID');
+  if (realId && String(adminId || '') !== realId) {
+    Utilities.sleep(800); // 비밀번호 오류와 응답 시간이 비슷해지도록
+    throw new Error('AUTH');
+  }
 
   if (String(password || '') === real) {
     if (props.getProperty('FAIL_COUNT')) props.deleteProperty('FAIL_COUNT');
@@ -101,19 +136,21 @@ function checkAdmin_(password) {
   }
   props.setProperties({ FAIL_COUNT: String(fails), FAIL_AT: String(now) });
   Utilities.sleep(800);
-  throw new Error('AUTH:' + (LOCK_MAX_FAILS - fails));
+  throw new Error('AUTH'); // 남은 횟수는 알려 주지 않는다. (알려 주면 아이디가 맞았는지 드러난다)
 }
 
 function route_(req) {
   switch (req.action) {
     case 'status': return status_();
     case 'setPassword': return setPassword_(req.password);
+    case 'setCredentials': return setCredentials_(req.adminId, req.password);
+    case 'setAdminId': return setAdminId_(req.newAdminId);
     case 'listPublic': return listPublic_();
     case 'getForm': return getForm_(req.id);
     case 'submit': return submit_(req.id, req.values);
     case 'login': return login_(req.name, req.hidden, req.withOwner);
     case 'listForms': return dashboard_(req.withOwner);
-    case 'me': return { owner: getOwner_() };
+    case 'me': return { owner: getOwner_(), adminId: PropertiesService.getScriptProperties().getProperty('ADMIN_ID') || '' };
     case 'setOwner': return setOwner_(req.name, req.hidden);
     case 'changePassword': return changePassword_(req.newPassword);
     case 'saveForm': return saveForm_(req.form);
@@ -242,7 +279,7 @@ function setOwner_(name, hidden) {
 // 관리자 화면 첫 데이터: 양식 목록 (withOwner 이면 요구자 정보도 함께. 이전 화면은 배열만 받는다)
 function dashboard_(withOwner) {
   const forms = listForms_();
-  return withOwner ? { forms: forms, owner: getOwner_() } : forms;
+  return withOwner ? { forms: forms, owner: getOwner_(), idSet: !!PropertiesService.getScriptProperties().getProperty('ADMIN_ID') } : forms;
 }
 
 // 관리자 로그인: 비밀번호 확인(doPost에서 처리) 후, 요구자 정보가 오면 저장하고 양식 목록을 돌려준다.

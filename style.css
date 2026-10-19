@@ -126,6 +126,8 @@ button.primary {
   font-family: var(--font-head); font-weight: 500; color: #fff; border-color: transparent;
   background: linear-gradient(135deg, var(--primary), var(--primary-2)); box-shadow: 0 6px 16px rgba(84, 87, 232, .30);
 }
+/* 폼 안의 큰 버튼은 문구가 길어도 화면 폭을 넘지 않도록 줄바꿈을 허용한다 */
+form button.primary { max-width: 100%; white-space: normal; }
 button.primary:hover { transform: translateY(-1px); box-shadow: 0 9px 20px rgba(84, 87, 232, .38); background: linear-gradient(135deg, var(--primary), var(--primary-2)); }
 button.danger { color: var(--danger); }
 button.danger:hover { background: var(--danger-soft); border-color: var(--danger); }
@@ -211,6 +213,7 @@ tbody tr:hover td { background: var(--card-soft); }
   width: min(380px, 100%); padding: 22px; background: var(--card); border: 1px solid var(--line);
   border-radius: 22px; box-shadow: 0 18px 50px rgba(84, 87, 232, .25); animation: pop .18s ease-out;
 }
+.modal-card .row { justify-content: flex-end; } /* 확인·취소 버튼은 오른쪽 정렬 */
 .modal-card h2 { margin-bottom: 6px; }
 .modal-card .muted { margin: 0 0 4px; }
 
