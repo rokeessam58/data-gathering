@@ -3,17 +3,30 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>자료 수집</title>
+  <title>자료 수합 도우미</title>
   <meta name="theme-color" content="#5457e8">
   <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <div class="brand"><span class="logo" aria-hidden="true">📋</span>자료 수집</div>
+  <div class="brand">
+    <span class="logo" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="5" y="5" width="14" height="17" rx="3"/>
+        <path d="M9 5V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v1"/>
+        <path d="M9 12h6M9 16h4"/>
+      </svg>
+    </span>
+    <span class="brand-text">자료 수합 도우미</span>
+  </div>
   <main id="app"></main>
   <div id="toast" role="status"></div>
-  <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <!-- 외부 스크립트는 내용이 바뀌면 브라우저가 실행하지 않도록 무결성(SRI) 값을 지정한다.
+       버전을 올릴 때는 새 파일의 sha384 값으로 함께 바꿔야 한다. -->
+  <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"
+          integrity="sha384-Pqp51FUN2/qzfxZxBCtF0stpc9ONI6MYZpVqmo8m20SoaQCzf+arZvACkLkirlPz" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"
+          integrity="sha384-+mbV2IY1Zk/X1p/nWllGySJSUN8uMs+gUAN10Or95UBH0fpj6GfKgPmgC5EXieXG" crossorigin="anonymous"></script>
   <script src="xlsx-io.js"></script>
   <script src="app.js"></script>
 </body>
