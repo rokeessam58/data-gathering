@@ -153,9 +153,10 @@ function route_(req) {
     case 'me': return { owner: getOwner_(), adminId: PropertiesService.getScriptProperties().getProperty('ADMIN_ID') || '' };
     case 'setOwner': return setOwner_(req.name, req.hidden);
     case 'changePassword': return changePassword_(req.newPassword);
-    case 'saveForm': return saveForm_(req.form);
-    case 'setOpen': return setOpen_(req.id, req.open);
-    case 'deleteForm': return deleteForm_(req.id);
+    case 'saveForm': return withList_(req, saveForm_(req.form));
+    case 'setOpen': return withList_(req, setOpen_(req.id, req.open));
+    case 'setListed': return withList_(req, setListed_(req.id, req.listed));
+    case 'deleteForm': return withList_(req, deleteForm_(req.id));
     case 'getData': return getData_(req.id);
     case 'deleteRow': return deleteRow_(req.id, req.index);
     default: throw new Error('알 수 없는 요청입니다.');
@@ -322,9 +323,18 @@ function submit_(id, values) {
 
 // ---------- 관리자 API ----------
 
+// 처리 결과와 함께 최신 양식 목록을 돌려준다. (withList 를 보낸 화면만. 이전 화면은 결과만 받는다)
+// 화면이 처리 뒤에 목록을 다시 요청하지 않아도 되므로 서버를 부르는 횟수가 절반으로 줄어든다.
+function withList_(req, result) {
+  return req.withList ? { result: result, forms: listForms_() } : result;
+}
+
 function listForms_() {
+  // 시트 목록은 한 번만 가져온다. (양식마다 전체 시트를 다시 훑으면 양식이 많을수록 느려진다)
+  const byId = {};
+  ss_().getSheets().forEach(function (s) { byId[s.getSheetId()] = s; });
   return readForms_().map(function (f) {
-    const sh = dataSheet_(f);
+    const sh = byId[f.sheetId] || null;
     return {
       id: f.id,
       title: f.title,
@@ -400,6 +410,13 @@ function saveForm_(form) {
 function setOpen_(id, open) {
   const f = findForm_(id);
   formsSheet_().getRange(f.row, 5).setValue(String(!!open));
+  return true;
+}
+
+// 메인페이지 목록에 보일지(true) 숨길지(false). 양식 내용은 건드리지 않는다.
+function setListed_(id, listed) {
+  const f = findForm_(id);
+  formsSheet_().getRange(f.row, 7).setNumberFormat('@').setValue(String(listed === true));
   return true;
 }
 

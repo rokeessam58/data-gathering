@@ -16,7 +16,7 @@ const LOADING_LABELS = {
   setPassword: '비밀번호를 설정하는 중이에요', login: '로그인하는 중이에요',
 };
 const SLOW_AFTER_MS = 6000;   // 이 시간이 지나도 응답이 없으면 "서버를 깨우는 중" 안내를 덧붙인다.
-const SHOW_AFTER_MS = 200;    // 아주 빠른 응답에는 로딩 창이 깜빡이지 않도록 잠깐 기다린다.
+const SHOW_AFTER_MS = 800;    // 이 시간 안에 끝나는 요청에는 대기 창을 띄우지 않는다. (자주 뜨면 오히려 느리게 느껴진다)
 
 // ---------- 공통 ----------
 
@@ -105,7 +105,7 @@ function showLoading(msg) {
   };
 }
 
-function mount(...nodes) { $app.replaceChildren(...nodes.flat()); window.scrollTo(0, 0); }
+function mount(...nodes) { dashSync = null; $app.replaceChildren(...nodes.flat()); window.scrollTo(0, 0); }
 
 let toastTimer;
 function toast(msg) {
@@ -598,6 +598,26 @@ async function guard(fn) {
   }
 }
 
+let lastDash = null; // 마지막으로 받은 {forms, owner, idSet}. 저장·뒤로 가기에서 서버를 다시 부르지 않고 바로 그리는 데 쓴다.
+let dashSync = null; // 지금 관리 화면이 떠 있으면, 서버가 준 최신 목록으로 화면을 조용히 맞추는 함수
+
+// 서버 오류를 알린다. (로그인 문제면 로그인 화면으로)
+function failAction(e, what) {
+  if (e.auth) return renderGate(e.message);
+  toast(`${what}: ${e.message}`);
+}
+
+// 관리 화면으로 돌아간다. 이미 받아 둔 목록이 있으면 바로 그리고, 최신 목록은 뒤에서 조용히 받아 맞춘다.
+function backToDashboard() {
+  if (!lastDash) return renderDashboard();
+  prefetched = lastDash;
+  renderDashboard();
+  api('listForms', { withOwner: true }, { quiet: true }).then((res) => {
+    const dash = normalizeDash(res);
+    if (dash && dashSync) dashSync(dash.forms);
+  }).catch(() => {}); // 조용한 갱신이라 실패해도 알리지 않는다
+}
+
 async function renderDashboard() {
   let dash = prefetched;
   prefetched = null;
@@ -610,11 +630,65 @@ async function renderDashboard() {
       return mount(h('div', { class: 'card' }, h('p', {}, e.message), h('button', { onclick: () => renderDashboard() }, '다시 시도')));
     }
   }
-  const { forms, owner } = dash;
+  const { owner } = dash;
   saveIdSet(dash.idSet);
   if (dash.idSet === false) return renderSetAdminId(); // 서버에 아이디가 없으면 먼저 정하게 한다 (이전 서버는 idSet 을 주지 않아 해당 없음)
   rememberOwner(owner);
+  lastDash = dash;
   const greeting = owner && owner.name ? `${owner.name} 선생님, 안녕하세요!` : '안녕하세요!';
+
+  // ── 양식 카드: 누르면 화면을 먼저 바꾸고 서버에는 뒤에서 요청한다. (실패하면 되돌리고 알린다)
+  const state = dash.forms.map((f) => ({ ...f }));
+  const busy = new Map(); // 양식 id → 처리 중인 동작 ('open' | 'listed' | 'delete')
+  const listBox = h('div', { class: 'form-list' });
+  const emptyNote = h('p', { class: 'muted' }, '아직 만든 양식이 없습니다.');
+  const paint = () => {
+    listBox.replaceChildren(...state.map((f) => formCard(f, busy.get(f.id), actions)));
+    emptyNote.hidden = state.length > 0;
+  };
+  // 서버가 준 최신 목록으로 화면을 맞춘다. 다른 처리가 남아 있으면 그 처리가 끝날 때 맞춘다.
+  const syncList = (list) => {
+    if (!Array.isArray(list) || busy.size > 0) return;
+    state.splice(0, state.length, ...list.map((f) => ({ ...f })));
+    if (lastDash) lastDash = { ...lastDash, forms: list };
+    paint();
+  };
+  const settle = (id, res) => { // 요청이 성공했을 때
+    busy.delete(id);
+    if (res && Array.isArray(res.forms)) syncList(res.forms);
+    else { if (lastDash) lastDash = { ...lastDash, forms: state.map((f) => ({ ...f })) }; paint(); } // 이전 서버는 목록을 주지 않으므로 화면 값을 그대로 둔다
+  };
+  const actions = {
+    async toggleOpen(f) {
+      if (busy.has(f.id)) return;
+      const prev = f.open;
+      f.open = !prev; busy.set(f.id, 'open'); paint();
+      try { settle(f.id, await api('setOpen', { id: f.id, open: f.open, withList: true }, { quiet: true })); }
+      catch (e) { busy.delete(f.id); f.open = prev; paint(); failAction(e, '접수 상태를 바꾸지 못했어요'); }
+    },
+    async toggleListed(f) {
+      if (busy.has(f.id)) return;
+      const prev = f.listed;
+      f.listed = !prev; busy.set(f.id, 'listed'); paint();
+      try {
+        settle(f.id, await setListed(f, f.listed));
+        toast(f.listed ? '메인페이지에 표시했어요' : '메인페이지에서 숨겼어요');
+      } catch (e) { busy.delete(f.id); f.listed = prev; paint(); failAction(e, '공개 여부를 바꾸지 못했어요'); }
+    },
+    async remove(f) {
+      if (busy.has(f.id)) return;
+      if (!confirm(`"${f.title}" 양식과 응답 ${f.count}건을 모두 삭제할까요? 되돌릴 수 없습니다.`)) return;
+      busy.set(f.id, 'delete'); paint(); // 삭제는 서버가 끝낼 때까지 흐리게 두고, 끝나면 카드를 없앤다
+      try {
+        const res = await api('deleteForm', { id: f.id, withList: true }, { quiet: true });
+        const i = state.findIndex((x) => x.id === f.id);
+        if (i >= 0) state.splice(i, 1);
+        settle(f.id, res);
+        toast('삭제했어요');
+      } catch (e) { busy.delete(f.id); paint(); failAction(e, '삭제하지 못했어요'); }
+    },
+  };
+  paint();
 
   const fileInput = h('input', {
     type: 'file', accept: '.xlsx', style: 'display:none',
@@ -630,17 +704,19 @@ async function renderDashboard() {
     h('div', { class: 'row between head-row' }, h('h1', {}, '자료 수합 관리'),
       h('div', { class: 'head-right' }, h('span', { class: 'greet' }, greeting), adminMenu())),
     h('div', { class: 'card' },
-      h('strong', {}, '선생님용 첫 화면 링크'),
-      h('div', { class: 'muted' }, '목록에 표시된 접수 중 자료가 나열됩니다.'),
+      h('strong', {}, '메인페이지(수합 중인 자료 목록) 링크'),
+      h('div', { class: 'muted' }, '응답을 받고 있는 모든 자료가 표시되는 페이지입니다.(숨긴 자료 제외)'),
+      h('div', { class: 'muted' }, '하나의 링크로 여러 자료를 한 번에 수합하고 싶으신 경우, 이 링크를 공유하세요.'),
       linkBox(homeLink())),
     h('div', { class: 'row' },
       h('button', { class: 'primary', onclick: () => openEditor({ title: '', description: '', open: true, fields: [{ label: '', type: 'text', required: true, options: [] }] }) }, '+ 새 양식 만들기'),
       h('button', { onclick: () => fileInput.click() }, '엑셀 양식 불러오기'), fileInput,
-      h('label', { class: 'muted' }, h('input', { type: 'checkbox', onchange: (e) => { includeTs = e.target.checked; } }), ' 다운로드 시 제출시각 열 포함')),
-    forms.length ? forms.map(formCard) : h('p', { class: 'muted' }, '아직 만든 양식이 없습니다.'),
+      h('label', { class: 'muted' }, h('input', { type: 'checkbox', checked: includeTs, onchange: (e) => { includeTs = e.target.checked; } }), ' 다운로드 시 제출시각 열 포함')),
+    listBox,
+    emptyNote,
   );
+  dashSync = syncList; // mount() 가 지운 뒤 다시 연결
 }
-
 // ---------- 관리자: 메뉴, 마이페이지 ----------
 
 // 마우스를 올리면 열리고 치우면 닫히는 메뉴. (터치 기기는 누르면 열리고 바깥을 누르면 닫힘, 키보드는 Enter로 열고 Esc로 닫음)
@@ -705,6 +781,27 @@ function askPasswordModal({ title, desc, verify }) {
   });
 }
 
+// 예/아니오를 묻는 확인 창. 확인을 고르면 true, 취소·Esc·바깥 클릭이면 false.
+// (브라우저 기본 confirm 대신 앱 모양의 창을 쓴다. 기본 선택은 안전한 쪽(취소)에 둔다.)
+function confirmModal({ title, desc, confirmText, cancelText, danger }) {
+  return new Promise((resolve) => {
+    const onKey = (e) => { if (e.key === 'Escape') close(false); };
+    const close = (value) => { document.removeEventListener('keydown', onKey); el.remove(); unlockApp(); resolve(value); };
+    const stay = h('button', { class: 'primary', type: 'button', onclick: () => close(false) }, cancelText);
+    const el = h('div', { class: 'modal', role: 'alertdialog', 'aria-modal': 'true', 'aria-label': title, onmousedown: (e) => { if (e.target === el) close(false); } },
+      h('div', { class: 'modal-card' },
+        h('h2', {}, title),
+        h('p', { class: 'muted' }, desc),
+        h('div', { class: 'row', style: 'margin-top:16px' },
+          h('button', { class: danger ? 'danger' : '', type: 'button', onclick: () => close(true) }, confirmText),
+          stay)));
+    document.addEventListener('keydown', onKey);
+    document.body.append(el);
+    lockApp();
+    stay.focus();
+  });
+}
+
 // 마이페이지는 비밀번호를 한 번 더 확인한 뒤에만 연다. (서버가 확인하며, 틀려도 기존 로그인 상태는 유지된다)
 async function openMyPage() {
   const res = await askPasswordModal({
@@ -727,7 +824,9 @@ function renderMyPage(serverOwner, adminId) {
   const preview = h('div', { class: 'muted' });
   const refreshPreview = () => {
     const v = owner.value();
-    preview.textContent = '선생님 화면 표시: ' + (v.hidden ? '요구자 : 비공개' : v.name ? `요구자 : ${v.name} 선생님` : '(이름을 입력해 주세요)');
+    if (!v.hidden && !v.name) return preview.replaceChildren('(이름을 입력해 주세요)');
+    // 조사: "…선생님"은 받침이 있어 "과", "…비공개"는 받침이 없어 "와"
+    preview.replaceChildren('화면 우측 상단에 ', h('b', {}, v.hidden ? '"요구자 : 비공개"' : `"요구자 : ${v.name} 선생님"`), (v.hidden ? '와' : '과') + ' 같이 표시됩니다.');
   };
   owner.node.addEventListener('input', refreshPreview);
   owner.node.addEventListener('change', refreshPreview);
@@ -737,7 +836,7 @@ function renderMyPage(serverOwner, adminId) {
   const newPw2 = h('input', { type: 'password', autocomplete: 'new-password', placeholder: '새 비밀번호를 한 번 더 입력', required: true });
 
   mount(
-    h('div', { class: 'row between' }, h('h1', {}, '마이페이지'), h('button', { onclick: () => renderDashboard() }, '← 돌아가기')),
+    h('div', { class: 'row between' }, h('h1', {}, '마이페이지'), h('button', { onclick: () => backToDashboard() }, '← 돌아가기')),
     adminId ? h('div', { class: 'card' },
       h('h2', {}, '로그인 정보'),
       h('div', {}, '아이디 ', h('b', {}, adminId)),
@@ -759,7 +858,7 @@ function renderMyPage(serverOwner, adminId) {
     },
     h('h2', {}, '자료 요구자'),
     owner.node, preview,
-    h('div', { style: 'margin-top:14px' }, h('button', { class: 'primary', type: 'submit' }, '저장'))),
+    h('div', { class: 'row end', style: 'margin-top:14px' }, h('button', { class: 'primary', type: 'submit' }, '저장'))),
     h('form', {
       class: 'card',
       novalidate: true,
@@ -790,23 +889,55 @@ function linkBox(url) {
     h('button', { class: 'sm', onclick: async () => { try { await navigator.clipboard.writeText(link.value); toast('링크를 복사했습니다'); } catch (e) { link.select(); toast('Ctrl+C로 복사하세요'); } } }, '링크 복사'));
 }
 
-function formCard(f) {
-  return h('div', { class: 'card' },
+// 눈 모양 아이콘 (공개 = 눈 뜸, 비공개 = 눈에 사선)
+const EYE_OPEN = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
+const EYE_OFF = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><path d="M1 1l22 22"/></svg>';
+
+// 메인페이지 목록에 보일지(공개) 숨길지(비공개)를 편집 화면 없이 바로 바꾼다.
+// 새 서버는 처리 결과와 최신 목록을 함께 돌려준다. 이전 서버(setListed 를 모름)는 양식을 받아 같은 내용으로 다시 저장해서 바꾼다.
+async function setListed(f, listed) {
+  try {
+    return await api('setListed', { id: f.id, listed, withList: true }, { quiet: true });
+  } catch (e) {
+    if (!/알 수 없는 요청/.test(e.message)) throw e;
+    const form = await api('getForm', { id: f.id }, { quiet: true });
+    return api('saveForm', { form: { ...form, listed }, withList: true }, { quiet: true });
+  }
+}
+
+// 처리 중인 버튼에는 작은 회전 표시를 붙인다. (화면 전체를 막는 대기 창 대신)
+const busyClass = (busyKind, kind) => (busyKind === kind ? ' busy' : '');
+
+function visibilityButton(f, busyKind, actions) {
+  const hidden = !f.listed;
+  const btn = h('button', {
+    class: (hidden ? 'sm icon vis off' : 'sm icon vis') + busyClass(busyKind, 'listed'), type: 'button',
+    title: hidden ? '비공개 중 (누르면 메인페이지에 표시합니다)' : '공개 중 (누르면 메인페이지에서 숨깁니다)',
+    'aria-label': hidden ? '비공개 중. 누르면 메인페이지에 표시합니다' : '공개 중. 누르면 메인페이지에서 숨깁니다',
+    'aria-busy': busyKind === 'listed' ? 'true' : null,
+    onclick: () => actions.toggleListed(f),
+  });
+  btn.innerHTML = hidden ? EYE_OFF : EYE_OPEN;
+  return btn;
+}
+
+function formCard(f, busyKind, actions) {
+  return h('div', { class: 'card' + (busyKind === 'delete' ? ' deleting' : '') },
     h('div', { class: 'row between' },
       h('strong', {}, f.title),
       h('span', { class: 'row' },
-        f.listed ? '' : h('span', { class: 'badge' }, '목록 숨김'),
+        f.listed ? '' : h('span', { class: 'badge' }, '비공개'),
         h('span', { class: 'badge ' + (f.open ? 'open' : '') }, f.open ? '접수 중' : '마감'))),
     h('div', { class: 'muted' }, `항목 ${f.fieldCount}개 · 응답 ${f.count}건`),
     linkBox(formLink(f.id)),
     h('div', { class: 'row', style: 'margin-top:10px' },
       h('button', { class: 'sm primary', onclick: () => guard(async () => { await XlsxIO.downloadResponses(await api('getData', { id: f.id }), includeTs); }) }, '엑셀 다운로드'),
       h('button', { class: 'sm', onclick: () => renderResponses(f.id) }, '응답 보기'),
-      h('button', { class: 'sm', onclick: async () => { const form = await guard(() => api('getForm', { id: f.id })); if (form) openEditor(form); } }, '편집'),
-      h('button', { class: 'sm', onclick: () => guard(async () => { await api('setOpen', { id: f.id, open: !f.open }); renderDashboard(); }) }, f.open ? '마감하기' : '다시 열기'),
-      h('button', { class: 'sm danger', onclick: () => { if (confirm(`"${f.title}" 양식과 응답 ${f.count}건을 모두 삭제할까요? 되돌릴 수 없습니다.`)) guard(async () => { await api('deleteForm', { id: f.id }); renderDashboard(); }); } }, '삭제')));
+      h('button', { class: 'sm', onclick: async () => { const form = await guard(() => api('getForm', { id: f.id })); if (form) openEditor({ ...form, listed: f.listed }); } }, '편집'), // 공개 여부는 목록 값을 이어받는다
+      visibilityButton(f, busyKind, actions),
+      h('button', { class: (f.open ? 'sm' : 'sm reopen') + busyClass(busyKind, 'open'), onclick: () => actions.toggleOpen(f) }, f.open ? '마감하기' : '다시 열기'),
+      h('button', { class: 'sm danger' + busyClass(busyKind, 'delete'), onclick: () => actions.remove(f) }, '삭제')));
 }
-
 // ---------- 관리자: 응답 보기 ----------
 
 async function renderResponses(id) {
@@ -815,7 +946,7 @@ async function renderResponses(id) {
   const body = data.rows.map((r, i) => h('tr', {}, r.map((v) => h('td', {}, v)),
     h('td', {}, h('button', { class: 'sm danger', onclick: () => { if (confirm('이 응답을 삭제할까요?')) guard(async () => { await api('deleteRow', { id, index: i }); renderResponses(id); }); } }, '삭제'))));
   mount(
-    h('div', { class: 'row between' }, h('h1', {}, data.form.title), h('button', { onclick: renderDashboard }, '← 목록')),
+    h('div', { class: 'row between' }, h('h1', {}, data.form.title), h('button', { onclick: () => backToDashboard() }, '← 목록')),
     h('p', { class: 'muted' }, `응답 ${data.rows.length}건`),
     h('div', { class: 'tablewrap' }, h('table', {}, h('thead', {}, h('tr', {}, data.headers.map((x) => h('th', {}, x)), h('th', {}, ''))), h('tbody', {}, body))));
 }
@@ -827,6 +958,23 @@ function openEditor(src) {
     id: src.id, title: src.title || '', description: src.description || '', open: src.open !== false, listed: src.listed !== false,
     fields: src.fields.map((f) => ({ label: f.label, type: f.type, required: !!f.required, options: [...(f.options || [])] })),
   };
+
+  // 변경 여부 비교용. 기존 양식은 열었을 때의 내용과, 새 양식·엑셀에서 불러온 양식은 빈 새 양식과 비교한다.
+  // (불러온 양식은 아직 저장된 적이 없으므로 그대로 나가도 내용이 사라진다)
+  const snap = (d) => JSON.stringify([d.title, d.description, d.open, d.listed, d.fields.map((f) => [f.label, f.type, f.required, f.options])]);
+  const blank = { title: '', description: '', open: true, listed: true, fields: [{ label: '', type: 'text', required: true, options: [] }] };
+  const baseline = draft.id ? snap(draft) : snap(blank);
+  async function leave() {
+    if (snap(draft) === baseline) return backToDashboard();
+    const leaveAnyway = await confirmModal({
+      title: '저장하지 않은 변경사항이 있어요',
+      desc: '지금 나가면 입력하거나 수정한 내용이 사라져요. 그래도 나갈까요?',
+      confirmText: '저장 안 하고 나가기',
+      cancelText: '계속 편집하기',
+      danger: true,
+    });
+    if (leaveAnyway) backToDashboard();
+  }
   const fieldsBox = h('div');
   const allReq = h('input', {
     type: 'checkbox',
@@ -870,7 +1018,9 @@ function openEditor(src) {
       if (!draft.title.trim()) return toast('양식 제목을 입력하세요');
       saveBtn.disabled = true;
       try {
-        const id = await api('saveForm', { form: draft });
+        const res = await api('saveForm', { form: draft, withList: true });
+        const id = res && Array.isArray(res.forms) ? res.result : res; // 새 서버: {result, forms} / 이전 서버: 아이디만
+        if (res && Array.isArray(res.forms) && lastDash) prefetched = { ...lastDash, forms: res.forms }; // 목록을 이미 받았으니 다시 요청하지 않는다
         await renderDashboard();
         toast('저장했습니다');
         return id;
@@ -879,7 +1029,7 @@ function openEditor(src) {
   }, '저장');
 
   mount(
-    h('div', { class: 'row between' }, h('h1', {}, draft.id ? '양식 편집' : '새 양식'), h('button', { onclick: renderDashboard }, '← 취소')),
+    h('div', { class: 'row between' }, h('h1', {}, draft.id ? '양식 편집하기' : '새 양식 만들기'), h('button', { onclick: leave }, '← 취소')),
     src.info ? h('div', { class: 'card' }, h('div', {}, src.info), h('div', { class: 'muted' }, '인식 결과가 맞는지 확인하고, 필수 여부와 항목 유형을 조정하세요.')) : '',
     (src.warnings || []).map((w) => h('div', { class: 'warn' }, w)),
     h('div', { class: 'card' },
@@ -888,24 +1038,97 @@ function openEditor(src) {
         h('input', { value: draft.title, oninput: (e) => { draft.title = e.target.value; } })),
       h('label', { class: 'field' }, '안내 문구 (선택)', h('textarea', { value: draft.description, oninput: (e) => { draft.description = e.target.value; } })),
       h('div', {},
-        h('label', {}, h('input', { type: 'checkbox', checked: draft.open, onchange: (e) => { draft.open = e.target.checked; } }), ' 접수 중')),
+        h('label', {}, h('input', { type: 'checkbox', checked: draft.open, onchange: (e) => { draft.open = e.target.checked; } }), ' 자료 제출 허용하기')),
       h('div', { style: 'margin-top:8px' },
-        h('label', {}, h('input', { type: 'checkbox', checked: draft.listed, onchange: (e) => { draft.listed = e.target.checked; } }), ' 첫 화면 목록에 표시 (끄면 링크를 아는 사람만 접근)'))),
-    h('div', { class: 'row between' },
-      h('h2', {}, '입력 항목'),
+        h('label', {}, h('input', { type: 'checkbox', checked: !draft.listed, onchange: (e) => { draft.listed = !e.target.checked; } }), ' 비공개(체크 시 메인페이지에서 숨겨지며, 개별 응답 링크로만 응답을 받을 수 있습니다.)'))),
+    h('div', { class: 'row between section-head' },
+      h('h2', {}, '입력 항목 편집'),
       h('label', {}, allReq, ' 모든 항목 필수')),
     fieldsBox,
-    h('div', { class: 'row' },
+    h('div', { class: 'row end' },
       h('button', { onclick: () => { draft.fields.push({ label: '', type: 'text', required: false, options: [] }); renderFields(); } }, '+ 항목 추가'),
       saveBtn),
     draft.id ? h('p', { class: 'muted' }, '이미 응답이 있는 양식은 항목 이름·개수·순서를 바꿀 수 없습니다.') : '');
 }
 
+// ---------- 앱 소개 페이지 (주소 뒤에 아무것도 붙지 않았을 때) ----------
+// 자료를 요구하는 분(관리 페이지 링크 포함)과 자료를 제출하러 온 분에게 각각 안내한다. 서버에 요청은 보내지 않는다.
+
+function renderAbout() {
+  const list = (items) => h('ul', { class: 'about-list' }, items.map((x) => h('li', {}, x)));
+  const step = (no, title, text) => h('div', { class: 'card about-step' },
+    h('span', { class: 'about-no', 'aria-hidden': 'true' }, no),
+    h('strong', {}, title),
+    h('p', { class: 'muted' }, text));
+  // 기능 설명: 소제목(키워드) → 결론 한 줄 → 보충 설명 (두괄식)
+  const feature = (keyword, headline, detail) => h('div', { class: 'about-feature' },
+    h('span', { class: 'f-key' }, keyword),
+    h('p', { class: 'f-head' }, headline),
+    h('p', { class: 'muted f-detail' }, detail));  const block = (chip, title, lead, ...children) => h('section', { class: 'about-block' },
+    h('span', { class: 'chip' }, chip),
+    h('h2', { class: 'about-title' }, title),
+    h('p', { class: 'muted about-lead' }, lead),
+    ...children);
+
+  mount(
+    h('section', { class: 'about-hero' },
+      h('h1', {}, '자료 수합, 링크 하나로 끝내요'),
+      h('p', { class: 'lead' }, '메신저로 엑셀 양식을 돌리고, 돌아온 파일을 하나씩 열어 복사해 붙이던 번거로움을 줄여 주는 웹앱이에요.')),
+
+    // ── 1) 자료를 요구하는 분
+    block('자료를 요구하시는 분', '자료를 모으고 싶어요',
+      '양식을 만들어 링크 하나로 선생님들께 전달하고, 들어온 응답은 엑셀로 내려받으세요.',
+      h('h3', { class: 'about-sub' }, '이런 기능이 있어요'),
+      h('div', { class: 'card about-features' }, [
+        feature('양식 만들기', '필요한 항목으로 양식을 직접 만들 수 있어요.',
+          '짧은 글, 긴 글, 숫자, 날짜, 전화번호, 이메일, 그리고 엑셀의 목록 선택처럼 쓰는 드롭다운을 지원해요. 항목마다 필수 여부도 정할 수 있어요.'),
+        feature('엑셀 불러오기', '받아 둔 엑셀 양식을 올리면 양식 초안이 만들어져요.',
+          '기관이나 단체에서 받은 엑셀 파일(.xlsx)의 제목 줄과 드롭다운 목록을 읽어 줘요. 여러 줄로 나뉜 제목도 인식해요.'),
+        feature('여러 자료 한 곳에서', '링크 하나로 여러 자료를 한 곳에서 받을 수 있어요.',
+          '자료마다 제출을 받을지 말지 정하고, 메인페이지 목록에 보일지(공개) 개별 링크로만 받을지(비공개)도 고를 수 있어요.'),
+        feature('구글 시트·엑셀', '응답은 구글 시트에 쌓이고, 엑셀 파일로 내려받을 수 있어요.',
+          '자료마다 시트가 따로 만들어져요. 엑셀 파일은 첫 줄에 항목 이름, 둘째 줄부터 응답이 들어가고 드롭다운도 그대로 살아 있어요.'),
+        feature('요구자 표시', '자료 요구자 이름을 보여 줄지 숨길지 정할 수 있어요.',
+          '이름을 보여 주면 선생님들 화면 오른쪽 위에 "요구자 : 홍길동 선생님"처럼 표시돼요. 비공개로 하면 이름은 서버에서 아예 내려가지 않아요.'),
+      ]),      h('h3', { class: 'about-sub' }, '시작하는 방법'),
+      h('div', { class: 'about-steps' },
+        step('1', '내 서버 만들기', '내 구글 시트의 Apps Script에 코드를 붙여넣고 웹 앱으로 배포해요. 처음 한 번만 하면 돼요.'),
+        step('2', '관리 페이지에서 연결', '배포한 주소를 입력하고, 관리용 아이디와 비밀번호를 정해요.'),
+        step('3', '양식 만들고 링크 보내기', '양식을 만든 뒤 "링크 복사"로 받은 링크를 선생님들께 전달해요.')),
+      h('div', { class: 'card' }, h('strong', {}, '이렇게 보관돼요'), list([
+        '제출된 응답은 이 웹사이트가 아니라 내 구글 시트에 저장돼요. 이 웹사이트에는 응답이 남지 않아요.',
+        '응답을 보고 내려받는 관리 기능은 아이디와 비밀번호로 보호돼요. 비밀번호를 여러 번 틀리면 잠시 잠겨요.',
+      ])),
+      h('div', { class: 'row end about-cta' },
+        h('a', { class: 'linkbtn', href: '?admin' }, '관리 페이지로 가기'))),
+
+    // ── 2) 자료를 제출하러 온 분
+    block('자료를 제출하러 오신 분', '자료를 제출하러 왔어요',
+      '이 페이지에서는 자료를 제출할 수 없어요. 자료 요구자가 보낸 링크로 접속해 주세요.',
+      h('div', { class: 'card notice' },
+        h('strong', {}, '링크를 받으셨나요?'),
+        h('p', { class: 'muted' }, '받은 링크를 눌러 열면 제출할 자료를 고르거나, 바로 입력 화면이 나와요.')),
+      h('h3', { class: 'about-sub' }, '제출은 이렇게 해요'),
+      h('div', { class: 'about-steps' },
+        step('1', '링크 열기', '자료 요구자에게 받은 링크를 열어요.'),
+        step('2', '자료 고르기', '목록에서 제출할 자료를 눌러요. 링크에 따라 입력 화면이 바로 열리기도 해요.'),
+        step('3', '입력하고 제출', '항목을 채워 제출하면 끝! 엑셀 파일을 다시 보내지 않아도 돼요.')),
+      h('div', { class: 'card' }, h('strong', {}, '안심하고 제출하세요'), list([
+        '제출한 내용은 자료 요구자의 구글 시트에만 저장돼요. 이 웹사이트에는 남지 않아요.',
+        '링크를 아는 사람은 누구나 제출할 수 있어요. 자료 요구자에게 직접 받은 링크인지 확인하고, 모르는 사람이 보낸 링크에는 개인정보를 입력하지 마세요.',
+        '링크가 열리지 않거나 받지 못했다면 자료를 요구한 분께 문의해 주세요.',
+      ]))),
+
+    h('p', { class: 'muted about-foot' }, '직접 운영해 보고 싶다면 GitHub의 rokeessam58/data-gathering 저장소에 있는 설명서(README)를 참고하세요.'),
+  );
+}
 // ---------- 시작 ----------
 
 (function start() {
   const params = new URLSearchParams(location.search);
   const id = params.get('f');
+  // 주소 뒤에 아무것도 붙지 않았으면(관리자·자료·서버 정보가 없으면) 앱 소개 페이지를 보여준다.
+  if (!params.has('admin') && !params.has('f') && !params.has('g')) return renderAbout();
   if (IS_ADMIN_PAGE) {
     if (!backendUrl) return renderSetup();
     return sessionStorage.getItem(PW_KEY) ? renderDashboard() : renderGate();
