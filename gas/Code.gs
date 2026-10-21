@@ -23,16 +23,26 @@ function doGet() {
   return out_({ ok: true, data: 'running' });
 }
 
+// 읽기만 하는 공개 요청은 스크립트 잠금을 쓰지 않는다. (선생님 화면이 주기적으로 목록을 확인해도 제출·관리 요청이 줄을 서지 않게)
+const READ_ONLY_ACTIONS = ['listPublic', 'getForm', 'status'];
+// 공개 목록(listPublic)에 영향을 주는 요청: 처리 뒤에 저장해 둔 목록을 지운다. (제출은 목록을 바꾸지 않으므로 지우지 않는다)
+const PUBLIC_LIST_CHANGERS = ['saveForm', 'setOpen', 'setListed', 'deleteForm', 'login', 'setOwner'];
+const PUBLIC_CACHE_KEY = 'pub_list_v1';
+const PUBLIC_CACHE_SEC = 10; // 선생님 목록을 이 시간 동안 저장해 둔다. (자료·공개 여부·요구자가 바뀌면 바로 지운다)
+
 function doPost(e) {
   try {
     const req = JSON.parse(e.postData.contents);
-    const lock = LockService.getScriptLock();
-    lock.waitLock(20000);
+    const readOnly = READ_ONLY_ACTIONS.indexOf(req.action) >= 0;
+    const lock = readOnly ? null : LockService.getScriptLock();
+    if (lock) lock.waitLock(20000);
     try {
       if (PUBLIC_ACTIONS.indexOf(req.action) < 0) checkAdmin_(req.adminId, req.password);
-      return out_({ ok: true, data: route_(req) });
+      const data = route_(req);
+      if (PUBLIC_LIST_CHANGERS.indexOf(req.action) >= 0) CacheService.getScriptCache().remove(PUBLIC_CACHE_KEY);
+      return out_({ ok: true, data: data });
     } finally {
-      lock.releaseLock();
+      if (lock) lock.releaseLock();
     }
   } catch (err) {
     return out_({ ok: false, error: String(err.message || err) });
@@ -145,7 +155,7 @@ function route_(req) {
     case 'setPassword': return setPassword_(req.password);
     case 'setCredentials': return setCredentials_(req.adminId, req.password);
     case 'setAdminId': return setAdminId_(req.newAdminId);
-    case 'listPublic': return listPublic_();
+    case 'listPublic': return listPublicCached_();
     case 'getForm': return getForm_(req.id);
     case 'submit': return submit_(req.id, req.values);
     case 'login': return login_(req.name, req.hidden, req.withOwner);
@@ -238,6 +248,16 @@ function writeHeader_(sh, fields) {
 }
 
 // ---------- 공개 API ----------
+
+// 선생님 화면이 20초마다 확인해도 시트를 매번 읽지 않도록, 결과를 잠깐 저장해 두고 돌려준다.
+function listPublicCached_() {
+  const cache = CacheService.getScriptCache();
+  const hit = cache.get(PUBLIC_CACHE_KEY);
+  if (hit) return JSON.parse(hit);
+  const value = listPublic_();
+  cache.put(PUBLIC_CACHE_KEY, JSON.stringify(value), PUBLIC_CACHE_SEC);
+  return value;
+}
 
 // 선생님 첫 화면용: 접수 중인 자료 목록과 자료 요구자(관리자) 표시 정보.
 // 비공개로 설정하면 이름은 서버에서 아예 내려보내지 않는다.
@@ -361,7 +381,8 @@ function cleanFields_(fields) {
       options = (f.options || []).map(function (o) { return String(o).trim(); }).filter(function (o) { return o; });
       if (!options.length) throw new Error('"' + label + '" 드롭다운에 선택지가 없습니다.');
     }
-    return { label: label, type: type, required: !!f.required, options: options };
+    const description = String(f.description || '').trim().slice(0, 300);
+    return { label: label, type: type, required: !!f.required, description: description, options: options };
   });
 }
 

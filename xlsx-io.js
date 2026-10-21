@@ -224,6 +224,8 @@
     };
   }
 
+  const FONT_NAME = '맑은 고딕';
+
   async function buildWorkbook({ fields, headers, rows, includeTimestamp }) {
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet('응답');
@@ -252,6 +254,12 @@
       ws.getColumn(i + 1).width = Math.min(Math.max(f.label.length * 2 + 4, 14), 40);
     });
     if (includeTimestamp) ws.getColumn(colCount).width = 20;
+
+    // 글꼴은 맑은 고딕으로 통일한다. 이미 채워진 셀은 하나씩, 이후 사용자가 새로 입력할 빈 칸은 열 서식으로 지정한다.
+    for (let c = 1; c <= colCount; c++) ws.getColumn(c).font = { name: FONT_NAME };
+    ws.eachRow((row) => row.eachCell({ includeEmpty: false }, (cell) => {
+      cell.font = { name: FONT_NAME, bold: cell.row === 1 };
+    }));
 
     // 드롭다운 유효성 검사 복원
     const lastRow = Math.max(rows.length + 1, 1000);

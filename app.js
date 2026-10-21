@@ -105,7 +105,7 @@ function showLoading(msg) {
   };
 }
 
-function mount(...nodes) { dashSync = null; $app.replaceChildren(...nodes.flat()); window.scrollTo(0, 0); }
+function mount(...nodes) { dashSync = null; stopHomePolling(); $app.replaceChildren(...nodes.flat()); window.scrollTo(0, 0); }
 
 let toastTimer;
 function toast(msg) {
@@ -257,26 +257,129 @@ function renderNoBackend() {
     h('p', { class: 'muted' }, '관리자라면 ', h('a', { href: '?admin' }, '관리자 화면'), '으로 들어가세요.'));
 }
 
+// ---------- 선생님 첫 화면: 일정 주기로 목록 새로고침 ----------
+// 관리자가 공개 여부·접수 여부를 바꾸면, 이미 열려 있는 선생님 화면에도 1분 안에 반영한다. (바로 보려면 새로고침 버튼)
+// 서버 부담을 줄이려고: 탭이 보일 때만, 조작이 있었을 때만 확인하고, 오류가 이어지면 간격을 늘리며,
+// 여러 사람이 같은 순간에 몰리지 않도록 간격을 조금씩 흩뜨린다. (서버도 목록을 10초간 저장해 둔다)
+const HOME_POLL_MS = 60000;                 // 확인 주기 (급한 경우에는 화면의 새로고침 버튼을 누른다)
+const HOME_POLL_MAX_MS = 300000;            // 오류가 이어질 때 늘려 가는 최대 간격
+const HOME_IDLE_LIMIT_MS = 10 * 60 * 1000;  // 이 시간 동안 조작이 없으면 확인을 멈춘다. (조작하거나 탭으로 돌아오면 바로 다시 시작)
+let homePoll = null;
+
+function stopHomePolling() { if (homePoll) { homePoll.stop(); homePoll = null; } }
+
+function startHomePolling(onData) {
+  stopHomePolling();
+  let timer = null, inflight = false, fails = 0, stopped = false;
+  let lastActive = Date.now(), lastOk = Date.now();
+  const idle = () => Date.now() - lastActive > HOME_IDLE_LIMIT_MS;
+  const delay = () => Math.min(HOME_POLL_MS * 2 ** fails, HOME_POLL_MAX_MS) + Math.random() * 6000;
+  const schedule = () => { if (stopped) return; clearTimeout(timer); timer = setTimeout(tick, delay()); };
+  async function tick() {
+    if (stopped) return;
+    if (document.visibilityState !== 'visible' || idle() || inflight) return schedule(); // 지금은 쉰다
+    inflight = true;
+    try {
+      const data = await api('listPublic', undefined, { quiet: true }); // 화면을 막는 대기 창 없이 조용히
+      fails = 0; lastOk = Date.now();
+      if (!stopped) onData(data);
+    } catch (e) { fails++; } // 실패해도 알리지 않는다. 다음 주기에 다시 시도한다.
+    finally { inflight = false; schedule(); }
+  }
+  const wake = () => { // 조작이 있었음. 쉬고 있었다면 기다리지 않고 바로 확인한다.
+    const wasIdle = idle();
+    lastActive = Date.now();
+    if (wasIdle && !stopped && !inflight) { clearTimeout(timer); tick(); }
+  };
+  const onVisible = () => { // 탭으로 돌아왔는데 마지막 확인이 오래됐으면 바로 확인한다.
+    if (document.visibilityState !== 'visible' || stopped) return;
+    if (Date.now() - lastOk > HOME_POLL_MS && !inflight) { clearTimeout(timer); tick(); }
+  };
+  const events = ['pointerdown', 'keydown', 'scroll', 'touchstart'];
+  events.forEach((ev) => window.addEventListener(ev, wake, { passive: true }));
+  document.addEventListener('visibilitychange', onVisible);
+  schedule();
+  homePoll = {
+    tick, // 시험용
+    reset() { fails = 0; lastOk = Date.now(); schedule(); }, // 방금 확인했으니 다음 자동 확인은 처음부터 다시 센다
+    stop() { stopped = true; clearTimeout(timer); events.forEach((ev) => window.removeEventListener(ev, wake)); document.removeEventListener('visibilitychange', onVisible); },
+  };
+}
+
+// 서버 버전에 따라 배열(이전) 또는 {forms, owner}(요구자 표시 지원)로 온다.
+function readHome(data) {
+  const list = Array.isArray(data) ? data : data && data.forms;
+  return Array.isArray(list) ? { list, owner: Array.isArray(data) ? null : data.owner } : null;
+}
+
+const REFRESH_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>';
+const MANUAL_REFRESH_COOLDOWN_MS = 5000; // 새로고침 버튼을 연달아 눌러도 서버에는 이 간격으로만 요청한다.
+
 async function renderHome() {
   if (!backendUrl) return renderNoBackend();
-  let data;
-  try { data = await api('listPublic'); } catch (e) { return mount(h('div', { class: 'card' }, h('p', {}, e.message))); }
-  // 서버 버전에 따라 배열(이전) 또는 {forms, owner}(요구자 표시 지원)로 온다.
-  const list = Array.isArray(data) ? data : data.forms;
-  const owner = Array.isArray(data) ? null : data.owner;
-  mount(
-    h('div', { class: 'title-row' },
-      h('h1', {}, '제출할 자료를 선택하세요.'),
-      owner ? h('span', { class: 'owner' }, ownerText(owner)) : ''),
-    list.length
+  let first;
+  try { first = readHome(await api('listPublic')); } catch (e) { return mount(h('div', { class: 'card' }, h('p', {}, e.message))); }
+  if (!first) return mount(h('div', { class: 'card' }, h('p', {}, '서버 응답을 해석하지 못했습니다. 배포 URL을 확인하세요.')));
+
+  const ownerEl = h('span', { class: 'owner' });
+  const listBox = h('div', { class: 'pick-list' });
+  const paint = ({ list, owner }) => {
+    ownerEl.textContent = owner ? ownerText(owner) : '';
+    ownerEl.hidden = !owner;
+    listBox.replaceChildren(...(list.length
       ? list.map((f) => h('a', { class: 'card pick', href: formLink(f.id) },
         h('strong', {}, f.title),
         f.description ? h('div', { class: 'muted pre' }, f.description) : ''))
-      : h('p', { class: 'muted' }, '현재 접수 중인 자료가 없습니다.'),
+      : [h('p', { class: 'muted' }, '현재 접수 중인 자료가 없습니다.')]));
+  };
+  let shown = JSON.stringify(first);
+  paint(first);
+
+  // 서버가 준 목록이 화면과 다를 때만 다시 그린다. 'changed' | 'same' | null(해석 불가)
+  const apply = (data) => {
+    const next = readHome(data);
+    if (!next) return null;
+    const sig = JSON.stringify(next);
+    if (sig === shown) return 'same';
+    shown = sig;
+    paint(next);
+    return 'changed';
+  };
+
+  // 수동 새로고침: 급할 때 바로 확인한다. (자동 확인은 1분마다라서 반영이 늦을 수 있다)
+  let refreshing = false, cooldownUntil = 0;
+  const refreshBtn = h('button', {
+    class: 'sm icon', type: 'button', title: '목록 새로고침', 'aria-label': '목록 새로고침',
+    onclick: async () => {
+      if (refreshing) return;
+      if (Date.now() < cooldownUntil) return toast('방금 새로고침했어요. 잠시 후 다시 눌러 주세요');
+      refreshing = true; refreshBtn.classList.add('busy'); refreshBtn.setAttribute('aria-busy', 'true');
+      try {
+        const r = apply(await api('listPublic', undefined, { quiet: true }));
+        if (r === null) throw new Error('서버 응답을 해석하지 못했습니다.');
+        if (homePoll) homePoll.reset(); // 방금 확인했으니 다음 자동 확인은 1분 뒤부터
+        toast(r === 'changed' ? '목록을 새로 불러왔어요' : '이미 최신 상태예요');
+      } catch (e) {
+        toast('새로고침하지 못했어요: ' + e.message);
+      } finally {
+        refreshing = false; cooldownUntil = Date.now() + MANUAL_REFRESH_COOLDOWN_MS;
+        refreshBtn.classList.remove('busy'); refreshBtn.removeAttribute('aria-busy');
+      }
+    },
+  });
+  refreshBtn.innerHTML = REFRESH_ICON;
+
+  mount(
+    h('div', { class: 'title-row' },
+      h('h1', {}, '제출할 자료를 선택하세요.'),
+      h('div', { class: 'title-tools' }, ownerEl, refreshBtn)),
+    listBox,
     linkWarning(),
     h('p', { class: 'muted' }, h('a', { href: '?admin' }, '관리자')));
-}
 
+  // 1분마다 조용히 확인해서, 목록이나 요구자 표시가 바뀐 경우에만 화면을 다시 그린다.
+  startHomePolling(apply);
+}
 // ---------- 응답자 화면 ----------
 
 async function renderRespondent(id) {
@@ -301,7 +404,8 @@ async function renderRespondent(id) {
     },
   },
   form.fields.map((f, i) => h('label', { class: 'field' },
-    f.label, f.required ? h('span', { class: 'req' }, ' *') : '', inputs[i])),
+    f.label, f.required ? h('span', { class: 'req' }, ' *') : '',
+    f.description ? h('span', { class: 'hint' }, f.description) : '', inputs[i])),
   btn);
 
   mount(h('h1', {}, form.title), form.description ? h('p', { class: 'muted', style: 'white-space:pre-wrap' }, form.description) : '',
@@ -708,6 +812,8 @@ async function renderDashboard() {
       h('div', { class: 'muted' }, '응답을 받고 있는 모든 자료가 표시되는 페이지입니다.(숨긴 자료 제외)'),
       h('div', { class: 'muted' }, '하나의 링크로 여러 자료를 한 번에 수합하고 싶으신 경우, 이 링크를 공유하세요.'),
       linkBox(homeLink())),
+    h('hr', { class: 'divider' }),
+    h('h2', { class: 'list-title' }, '자료 목록'),
     h('div', { class: 'row' },
       h('button', { class: 'primary', onclick: () => openEditor({ title: '', description: '', open: true, fields: [{ label: '', type: 'text', required: true, options: [] }] }) }, '+ 새 양식 만들기'),
       h('button', { onclick: () => fileInput.click() }, '엑셀 양식 불러오기'), fileInput,
@@ -933,7 +1039,7 @@ function formCard(f, busyKind, actions) {
     h('div', { class: 'row', style: 'margin-top:10px' },
       h('button', { class: 'sm primary', onclick: () => guard(async () => { await XlsxIO.downloadResponses(await api('getData', { id: f.id }), includeTs); }) }, '엑셀 다운로드'),
       h('button', { class: 'sm', onclick: () => renderResponses(f.id) }, '응답 보기'),
-      h('button', { class: 'sm', onclick: async () => { const form = await guard(() => api('getForm', { id: f.id })); if (form) openEditor({ ...form, listed: f.listed }); } }, '편집'), // 공개 여부는 목록 값을 이어받는다
+      h('button', { class: 'sm', onclick: async () => { const form = await guard(() => api('getForm', { id: f.id })); if (form) openEditor({ ...form, listed: f.listed, locked: f.count > 0 }); } }, '편집'), // 공개 여부는 목록 값을 이어받는다
       visibilityButton(f, busyKind, actions),
       h('button', { class: (f.open ? 'sm' : 'sm reopen') + busyClass(busyKind, 'open'), onclick: () => actions.toggleOpen(f) }, f.open ? '마감하기' : '다시 열기'),
       h('button', { class: 'sm danger' + busyClass(busyKind, 'delete'), onclick: () => actions.remove(f) }, '삭제')));
@@ -953,15 +1059,51 @@ async function renderResponses(id) {
 
 // ---------- 관리자: 양식 편집기 ----------
 
+// 자료 제목은 구글 시트의 시트 이름이 되므로 : \ / ? * [ ] 문자는 쓸 수 없다. 저장할 때 서버도 확인하지만, 입력 단계에서 아예 막는다.
+const BAD_TITLE_G = /[:\\\/?*\[\]]/g;
+const BAD_TITLE = /[:\\\/?*\[\]]/;
+const sanitizeTitle = (s) => String(s || '').replace(BAD_TITLE_G, '');
+
+// 막힌 문자를 시도하면 안내 문구가 잠깐 빨갛게 강조된다.
+function guardedTitleInput(draft, hintEl) {
+  let timer;
+  const flash = () => {
+    // 연속으로 시도해도 흔들림이 매번 다시 시작되도록 클래스를 뺐다가 다시 붙인다.
+    hintEl.classList.remove('flash');
+    void hintEl.offsetWidth;
+    hintEl.classList.add('flash');
+    clearTimeout(timer);
+    timer = setTimeout(() => hintEl.classList.remove('flash'), 1800);
+  };
+  const input = h('input', { value: draft.title, maxlength: '100', autocomplete: 'off' });
+  // 키보드로 입력하는 순간에 막는다.
+  input.addEventListener('beforeinput', (e) => {
+    if (typeof e.data === 'string' && BAD_TITLE.test(e.data)) { e.preventDefault(); flash(); }
+  });
+  // 붙여넣기·끌어다 놓기처럼 위에서 걸러지지 않는 입력은 들어온 뒤 바로 지우고, 커서 위치는 그대로 둔다.
+  input.addEventListener('input', () => {
+    const v = input.value;
+    if (BAD_TITLE.test(v)) {
+      const caret = sanitizeTitle(v.slice(0, input.selectionStart)).length;
+      input.value = sanitizeTitle(v);
+      input.setSelectionRange(caret, caret);
+      flash();
+    }
+    draft.title = input.value;
+  });
+  return input;
+}
+
 function openEditor(src) {
   const draft = {
-    id: src.id, title: src.title || '', description: src.description || '', open: src.open !== false, listed: src.listed !== false,
-    fields: src.fields.map((f) => ({ label: f.label, type: f.type, required: !!f.required, options: [...(f.options || [])] })),
+    locked: !!src.locked, // 이미 응답이 있으면 항목 이름·개수·순서를 바꿀 수 없다
+    id: src.id, title: sanitizeTitle(src.title), description: src.description || '', open: src.open !== false, listed: src.listed !== false,
+    fields: src.fields.map((f) => ({ label: f.label, type: f.type, required: !!f.required, description: f.description || '', options: [...(f.options || [])] })),
   };
 
   // 변경 여부 비교용. 기존 양식은 열었을 때의 내용과, 새 양식·엑셀에서 불러온 양식은 빈 새 양식과 비교한다.
   // (불러온 양식은 아직 저장된 적이 없으므로 그대로 나가도 내용이 사라진다)
-  const snap = (d) => JSON.stringify([d.title, d.description, d.open, d.listed, d.fields.map((f) => [f.label, f.type, f.required, f.options])]);
+  const snap = (d) => JSON.stringify([d.title, d.description, d.open, d.listed, d.fields.map((f) => [f.label, f.type, f.required, f.description, f.options])]);
   const blank = { title: '', description: '', open: true, listed: true, fields: [{ label: '', type: 'text', required: true, options: [] }] };
   const baseline = draft.id ? snap(draft) : snap(blank);
   async function leave() {
@@ -997,20 +1139,27 @@ function openEditor(src) {
       });
       return h('div', { class: 'fcard' },
         h('div', { class: 'grid' },
-          h('input', { placeholder: '항목 이름 (예: 이름, 연락처)', value: f.label, oninput: (e) => { f.label = e.target.value; } }),
+          h('input', { placeholder: '항목 이름 (예: 이름, 연락처)', value: f.label, disabled: draft.locked, oninput: (e) => { f.label = e.target.value; } }),
           h('select', { value: f.type, onchange: (e) => { f.type = e.target.value; renderFields(); } },
             Object.entries(TYPE_LABELS).map(([k, v]) => h('option', { value: k }, v)))),
+        h('input', {
+          class: 'f-desc', placeholder: '항목 설명 (선택)', value: f.description, maxlength: '300',
+          oninput: (e) => { f.description = e.target.value; },
+        }),
         f.type === 'select' ? h('div', { style: 'margin-top:8px' }, optBox) : '',
         h('div', { class: 'row between', style: 'margin-top:8px' },
           h('label', {}, h('input', { type: 'checkbox', checked: f.required, onchange: (e) => { f.required = e.target.checked; syncAllReq(); } }), ' 필수'),
           h('div', { class: 'row' },
-            h('button', { class: 'sm', disabled: i === 0, onclick: () => { move(i, -1); } }, '↑'),
-            h('button', { class: 'sm', disabled: i === draft.fields.length - 1, onclick: () => { move(i, 1); } }, '↓'),
-            h('button', { class: 'sm danger', onclick: () => { draft.fields.splice(i, 1); renderFields(); } }, '삭제'))));
+            h('button', { class: 'sm', disabled: draft.locked || i === 0, onclick: () => { move(i, -1); } }, '↑'),
+            h('button', { class: 'sm', disabled: draft.locked || i === draft.fields.length - 1, onclick: () => { move(i, 1); } }, '↓'),
+            h('button', { class: 'sm danger', disabled: draft.locked, onclick: () => { draft.fields.splice(i, 1); renderFields(); } }, '삭제'))));
     }));
   }
   function move(i, d) { const [x] = draft.fields.splice(i, 1); draft.fields.splice(i + d, 0, x); renderFields(); }
   renderFields();
+
+  const titleHint = h('span', { class: 'hint' }, '구글 시트의 시트 이름으로 사용됩니다. 다른 자료와 겹치면 안 되고, : \\ / ? * [ ] 문자는 입력할 수 없습니다.');
+  const titleInput = guardedTitleInput(draft, titleHint);
 
   const saveBtn = h('button', {
     class: 'primary',
@@ -1033,22 +1182,19 @@ function openEditor(src) {
     src.info ? h('div', { class: 'card' }, h('div', {}, src.info), h('div', { class: 'muted' }, '인식 결과가 맞는지 확인하고, 필수 여부와 항목 유형을 조정하세요.')) : '',
     (src.warnings || []).map((w) => h('div', { class: 'warn' }, w)),
     h('div', { class: 'card' },
-      h('label', { class: 'field' }, '자료 제목',
-        h('span', { class: 'hint' }, '구글 시트의 시트 이름으로 사용됩니다. 다른 자료와 겹치거나 : \\ / ? * [ ] 문자가 있으면 안 됩니다.'),
-        h('input', { value: draft.title, oninput: (e) => { draft.title = e.target.value; } })),
+      h('label', { class: 'field' }, '자료 제목', titleHint, titleInput),
       h('label', { class: 'field' }, '안내 문구 (선택)', h('textarea', { value: draft.description, oninput: (e) => { draft.description = e.target.value; } })),
       h('div', {},
         h('label', {}, h('input', { type: 'checkbox', checked: draft.open, onchange: (e) => { draft.open = e.target.checked; } }), ' 자료 제출 허용하기')),
       h('div', { style: 'margin-top:8px' },
         h('label', {}, h('input', { type: 'checkbox', checked: !draft.listed, onchange: (e) => { draft.listed = !e.target.checked; } }), ' 비공개(체크 시 메인페이지에서 숨겨지며, 개별 응답 링크로만 응답을 받을 수 있습니다.)'))),
     h('div', { class: 'row between section-head' },
-      h('h2', {}, '입력 항목 편집'),
+      h('div', { class: 'row' }, h('h2', {}, '입력 항목 편집'), draft.locked ? h('span', { class: 'lock-note' }, '이미 제출된 응답이 있어, 항목 이름·개수·순서는 바꿀 수 없습니다.') : ''),
       h('label', {}, allReq, ' 모든 항목 필수')),
     fieldsBox,
     h('div', { class: 'row end' },
-      h('button', { onclick: () => { draft.fields.push({ label: '', type: 'text', required: false, options: [] }); renderFields(); } }, '+ 항목 추가'),
-      saveBtn),
-    draft.id ? h('p', { class: 'muted' }, '이미 응답이 있는 양식은 항목 이름·개수·순서를 바꿀 수 없습니다.') : '');
+      h('button', { disabled: draft.locked, onclick: () => { draft.fields.push({ label: '', type: 'text', required: false, description: '', options: [] }); renderFields(); } }, '+ 항목 추가'),
+      saveBtn));
 }
 
 // ---------- 앱 소개 페이지 (주소 뒤에 아무것도 붙지 않았을 때) ----------
