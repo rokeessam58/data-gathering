@@ -130,6 +130,8 @@ button.primary {
   font-family: var(--font-head); font-weight: 500; color: #fff; border-color: transparent;
   background: linear-gradient(135deg, var(--primary), var(--primary-2)); box-shadow: 0 6px 16px rgba(84, 87, 232, .30);
 }
+/* 확인 창에서 옆 버튼과 글꼴을 맞춘다. (강조 버튼의 제목용 글꼴 대신 본문 글꼴) */
+button.primary.plain-font { font: 700 .95rem var(--font-body); }
 /* 버튼은 오른쪽 정렬한다. (폼 끝의 버튼, 카드 안에 단독으로 놓인 버튼, 버튼 줄 .row.end)
    "자료 수합 관리" 화면의 버튼들은 이 규칙에 해당하지 않는다. */
 form > button, .card > button { display: block; margin-left: auto; }
@@ -188,7 +190,7 @@ a.pick { display: block; position: relative; color: inherit; text-decoration: no
   transition: transform .15s, box-shadow .15s, border-color .15s; }
 a.pick::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 6px; background: linear-gradient(180deg, var(--primary), var(--primary-2)); }
 a.pick::after { content: '›'; position: absolute; right: 18px; top: 50%; transform: translateY(-52%); font-size: 1.8rem; color: var(--primary); }
-a.pick strong { font: 700 1.05rem var(--font-head); }
+a.pick strong { font: 700 1.05rem var(--font-body); }
 a.pick:hover { transform: translateY(-2px); border-color: var(--primary); box-shadow: 0 12px 28px rgba(84, 87, 232, .18); }
 
 /* 응답 표 */
@@ -246,7 +248,9 @@ tbody tr:hover td { background: var(--card-soft); }
 .about-feature:first-child { padding-top: 2px; border-top: 0; }
 .about-feature:last-child { padding-bottom: 2px; }
 .fcard .f-desc { margin-top: 8px; }
+.ul { text-decoration: underline; text-underline-offset: 2px; }
 .hl { color: var(--primary-deep); } /* 안내 글 속에서 꼭 골라야 하는 값 */
+.req-note { margin: 0; font-size: .85rem; color: var(--muted); }
 .lock-note { color: var(--danger); font-size: .85rem; font-weight: 700; }
 input:disabled, button:disabled { cursor: not-allowed; }
 /* 막힌 문자를 입력하려 했을 때 안내 문구를 잠깐 강조 */

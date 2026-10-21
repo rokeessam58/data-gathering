@@ -401,12 +401,28 @@ async function renderRespondent(id) {
       } catch (e) { toast(e.message); btn.disabled = false; btn.textContent = '제출'; }
     },
   },
+  form.fields.some((f) => f.required) ? h('p', { class: 'req-note' }, h('span', { class: 'req' }, '*'), ' 표시가 있는 항목은 필수로 입력해야 해요.') : '',
   form.fields.map((f, i) => h('label', { class: 'field' },
     f.label, f.required ? h('span', { class: 'req' }, ' *') : '',
     f.description ? h('span', { class: 'hint' }, f.description) : '', inputs[i])),
   btn);
 
-  mount(h('h1', {}, form.title), form.description ? h('p', { class: 'muted', style: 'white-space:pre-wrap' }, form.description) : '',
+  // 하나라도 입력했다면 나가기 전에 한 번 더 묻는다.
+  async function leave() {
+    if (inputs.some((i) => i.value)) {
+      const leaveAnyway = await confirmModal({
+        title: '입력한 내용이 사라져요',
+        desc: '지금 나가면 입력한 내용이 사라져요. 그래도 나갈까요?',
+        confirmText: '나가기',
+        cancelText: '계속 입력하기',
+        danger: true,
+      });
+      if (!leaveAnyway) return;
+    }
+    location.href = homeLink();
+  }
+
+  mount(h('div', { class: 'row between' }, h('h1', {}, form.title), h('button', { onclick: leave }, '← 취소')), form.description ? h('p', { class: 'muted', style: 'white-space:pre-wrap' }, form.description) : '',
     h('div', { class: 'card' }, formEl),
     linkWarning());
 }
@@ -516,12 +532,14 @@ function renderSetup(msg, entered) {
       h('h2', {}, '처음 한 번만 하는 설정'),
       h('ol', {},
         h('li', {}, '서버로 사용할 구글 계정으로 로그인한 후, ',
-          h('a', { href: SHEET_COPY_URL, target: '_blank', rel: 'noopener', style: 'text-decoration:underline' }, '여기'),
+          h('a', { href: SHEET_COPY_URL, target: '_blank', rel: 'noopener', class: 'hl', style: 'text-decoration:underline; font-weight:700' }, '여기'),
           '를 눌러 ', h('b', {}, '"사본 만들기"'), '를 클릭하세요.'),
         h('li', {}, h('b', {}, '확장 프로그램 → Apps Script'), '를 엽니다.'),
         h('li', {}, h('b', {}, '배포 → 새 배포'), '로 들어가서, ',
-          '유형 선택: ', h('b', { class: 'hl' }, '"웹 앱"'), ', 다음 사용자 인증 정보로 실행: ', h('b', { class: 'hl' }, '"나"'),
-          ', 액세스 권한: ', h('b', { class: 'hl' }, '"모든 사용자"'),
+          h('b', {},
+            h('span', { class: 'ul' }, '1) 유형 선택: ', h('span', { class: 'hl' }, '"웹 앱"')), ', ',
+            h('span', { class: 'ul' }, '2) 다음 사용자 인증 정보로 실행: ', h('span', { class: 'hl' }, '"나"')), ', ',
+            h('span', { class: 'ul' }, '3) 액세스 권한: ', h('span', { class: 'hl' }, '"모든 사용자"'))),
           '로 설정한 후 배포하고, 액세스를 승인합니다.'),
         h('li', {}, '배포가 완료된 후 화면에 표시되는 ', h('b', {}, '웹 앱 URL(…/exec)'), '을 복사하여, 위 칸에 붙여넣습니다.'),
         h('li', {}, '다음 화면에서 관리자 아이디와 비밀번호를 설정해 주세요.'))));
@@ -764,10 +782,24 @@ async function renderDashboard() {
   const actions = {
     async toggleOpen(f) {
       if (busy.has(f.id)) return;
-      const prev = f.open;
-      f.open = !prev; busy.set(f.id, 'open'); paint();
-      try { settle(f.id, await api('setOpen', { id: f.id, open: f.open, withList: true }, { quiet: true })); }
-      catch (e) { busy.delete(f.id); f.open = prev; paint(); failAction(e, '접수 상태를 바꾸지 못했어요'); }
+      // 접수 중/마감 표시는 버튼이 돌아가는 동안 그대로 두었다가, 서버가 끝낸 뒤에 버튼과 함께 바꾼다.
+      const next = !f.open;
+      if (!next) { // 마감은 한 번 더 묻는다. (다시 열기는 바로 처리)
+        const ok = await confirmModal({
+          title: `"${f.title}" 접수를 마감할까요?`,
+          desc: '마감하면 더 이상 응답을 받을 수 없고, 필요하면 "다시 열기"로 언제든 다시 열 수 있어요.',
+          confirmText: '마감하기',
+          cancelText: '취소',
+          danger: true,
+        });
+        if (!ok || busy.has(f.id)) return;
+      }
+      busy.set(f.id, 'open'); paint();
+      try {
+        const res = await api('setOpen', { id: f.id, open: next, withList: true }, { quiet: true });
+        f.open = next;
+        settle(f.id, res);
+      } catch (e) { busy.delete(f.id); paint(); failAction(e, '접수 상태를 바꾸지 못했어요'); }
     },
     async toggleListed(f) {
       if (busy.has(f.id)) return;
@@ -892,7 +924,7 @@ function confirmModal({ title, desc, confirmText, cancelText, danger }) {
   return new Promise((resolve) => {
     const onKey = (e) => { if (e.key === 'Escape') close(false); };
     const close = (value) => { document.removeEventListener('keydown', onKey); el.remove(); unlockApp(); resolve(value); };
-    const stay = h('button', { class: 'primary', type: 'button', onclick: () => close(false) }, cancelText);
+    const stay = h('button', { class: 'primary plain-font', type: 'button', onclick: () => close(false) }, cancelText);
     const el = h('div', { class: 'modal', role: 'alertdialog', 'aria-modal': 'true', 'aria-label': title, onmousedown: (e) => { if (e.target === el) close(false); } },
       h('div', { class: 'modal-card' },
         h('h2', {}, title),
