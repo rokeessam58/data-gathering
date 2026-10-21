@@ -17,6 +17,7 @@
   --text: #25253d; --muted: #6a6d8c; --line: #e4e6f8;
   --primary: #5457e8; --primary-2: #7c4dff; --primary-soft: #ecebff;
   --accent: #ff7a59;
+  --primary-deep: #3b2fc2; /* 글자 강조용: 기본 보라보다 한 단계 진한 색 */
   --ok: #0e9f77; --ok-soft: #dcf7ee; --ok-strong: #0a7a5a;
   --danger: #e0405f; --danger-soft: #ffe6ec;
   --warn-bg: #fff4d6; --warn-text: #7a5300; --warn-line: #f3d98a;
@@ -32,6 +33,7 @@
     --text: #ecebff; --muted: #a9acd0; --line: #34345e;
     --primary: #8f93ff; --primary-2: #b08cff; --primary-soft: #2e2e5c;
     --accent: #ff9a7d;
+    --primary-deep: #a9acff; /* 어두운 배경에서는 진하게 = 더 또렷하게 */
     --ok: #4fd6ad; --ok-soft: #173d38; --ok-strong: #7ae8c6;
     --danger: #ff7b93; --danger-soft: #4a2030;
     --warn-bg: #3d3314; --warn-text: #f5d98a; --warn-line: #6b5a22;
@@ -244,6 +246,7 @@ tbody tr:hover td { background: var(--card-soft); }
 .about-feature:first-child { padding-top: 2px; border-top: 0; }
 .about-feature:last-child { padding-bottom: 2px; }
 .fcard .f-desc { margin-top: 8px; }
+.hl { color: var(--primary-deep); } /* 안내 글 속에서 꼭 골라야 하는 값 */
 .lock-note { color: var(--danger); font-size: .85rem; font-weight: 700; }
 input:disabled, button:disabled { cursor: not-allowed; }
 /* 막힌 문자를 입력하려 했을 때 안내 문구를 잠깐 강조 */

@@ -253,8 +253,7 @@ function renderNoBackend() {
   mount(h('h1', {}, '링크가 필요해요'),
     h('div', { class: 'card' },
       h('p', {}, '선생님이라면 관리자에게 받은 링크로 접속해 주세요.'),
-      h('p', { class: 'muted' }, '이 주소만으로는 어느 자료를 제출해야 하는지 알 수 없습니다.')),
-    h('p', { class: 'muted' }, '관리자라면 ', h('a', { href: '?admin' }, '관리자 화면'), '으로 들어가세요.'));
+      h('p', { class: 'muted' }, '이 주소만으로는 어느 자료를 제출해야 하는지 알 수 없습니다.')));
 }
 
 // ---------- 선생님 첫 화면: 일정 주기로 목록 새로고침 ----------
@@ -374,8 +373,7 @@ async function renderHome() {
       h('h1', {}, '제출할 자료를 선택하세요.'),
       h('div', { class: 'title-tools' }, ownerEl, refreshBtn)),
     listBox,
-    linkWarning(),
-    h('p', { class: 'muted' }, h('a', { href: '?admin' }, '관리자')));
+    linkWarning());
 
   // 1분마다 조용히 확인해서, 목록이나 요구자 표시가 바뀐 경우에만 화면을 다시 그린다.
   startHomePolling(apply);
@@ -429,11 +427,8 @@ function buildInput(f) {
 // ---------- 관리자: 로그인 ----------
 
 // 이 앱이 GitHub Pages에 있으면 Code.gs 원문 위치를 안내할 수 있다.
-function codeGsUrl() {
-  const m = /^([\w-]+)\.github\.io$/.exec(location.hostname);
-  const repo = location.pathname.split('/')[1];
-  return m && repo ? `https://github.com/${m[1]}/${repo}/blob/main/gas/Code.gs` : '';
-}
+// Code.gs 가 이미 들어 있는 구글 시트 원본의 "사본 만들기" 주소. 서버 연결 화면 1번 안내에서 링크로 쓴다.
+const SHEET_COPY_URL = 'https://docs.google.com/spreadsheets/d/1CG9Pk7vlT08Xs5di4hvHDmmV-hJmRYZBl4j1YiSn0S8/copy';
 
 // 입력한 주소가 실제로 이 앱의 서버(Code.gs)인지, 관리자 비밀번호가 이미 정해져 있는지 확인한다.
 // 돌려주는 값: { problem: 안내 문구 | null, passwordSet, idSet, ownerSet }  (모두 true | false)
@@ -492,10 +487,9 @@ const MIN_PW_LEN = 8; // Code.gs 의 MIN_PASSWORD_LEN 과 같은 값
 
 function renderSetup(msg, entered) {
   const url = h('input', { placeholder: 'https://script.google.com/macros/s/…/exec', value: entered != null ? entered : storedBackend() || '', required: true, autocomplete: 'off' });
-  const link = codeGsUrl();
   const btn = h('button', { class: 'primary', type: 'submit' }, '확인하고 저장');
   mount(h('h1', {}, '서버 연결'),
-    h('p', { class: 'muted' }, '자료는 관리자의 구글 시트에 쌓입니다. 아래 순서로 Apps Script 웹 앱을 만들고 주소를 입력하세요. 한 번 입력하면 이 브라우저에 저장됩니다.'),
+    h('p', { class: 'muted' }, '자료는 관리자(자료 요구자)의 구글 시트에 쌓입니다. 아래 순서로 Apps Script 웹 앱을 만들고 주소를 입력하세요. 한 번 입력하면 이 브라우저에 저장됩니다.'),
     h('form', {
       class: 'card',
       novalidate: true,
@@ -521,11 +515,16 @@ function renderSetup(msg, entered) {
     h('div', { class: 'card' },
       h('h2', {}, '처음 한 번만 하는 설정'),
       h('ol', {},
-        h('li', {}, '새 구글 스프레드시트를 만들고 ', h('b', {}, '확장 프로그램 → Apps Script'), '를 엽니다.'),
-        h('li', {}, link ? h('span', {}, h('a', { href: link, target: '_blank', rel: 'noopener' }, 'Code.gs'), ' 내용을 복사해 붙여넣고 저장합니다.') : 'gas/Code.gs 내용을 복사해 붙여넣고 저장합니다.'),
-        h('li', {}, h('b', {}, '배포 → 새 배포 → 웹 앱'), ': 실행 계정 "나", 액세스 권한 "모든 사용자"로 배포하고 권한을 승인합니다.'),
-        h('li', {}, '표시되는 웹 앱 URL(…/exec)을 위 칸에 붙여넣습니다.'),
-        h('li', {}, '관리자 비밀번호는 다음 화면에서 처음 한 번 정하면 됩니다.'))));
+        h('li', {}, '서버로 사용할 구글 계정으로 로그인한 후, ',
+          h('a', { href: SHEET_COPY_URL, target: '_blank', rel: 'noopener', style: 'text-decoration:underline' }, '여기'),
+          '를 눌러 ', h('b', {}, '"사본 만들기"'), '를 클릭하세요.'),
+        h('li', {}, h('b', {}, '확장 프로그램 → Apps Script'), '를 엽니다.'),
+        h('li', {}, h('b', {}, '배포 → 새 배포'), '로 들어가서, ',
+          '유형 선택: ', h('b', { class: 'hl' }, '"웹 앱"'), ', 다음 사용자 인증 정보로 실행: ', h('b', { class: 'hl' }, '"나"'),
+          ', 액세스 권한: ', h('b', { class: 'hl' }, '"모든 사용자"'),
+          '로 설정한 후 배포하고, 액세스를 승인합니다.'),
+        h('li', {}, '배포가 완료된 후 화면에 표시되는 ', h('b', {}, '웹 앱 URL(…/exec)'), '을 복사하여, 위 칸에 붙여넣습니다.'),
+        h('li', {}, '다음 화면에서 관리자 아이디와 비밀번호를 설정해 주세요.'))));
 }
 
 let prefetched = null; // 로그인 응답에 실려 온 {forms, owner} (대시보드가 한 번 더 요청하지 않도록)
