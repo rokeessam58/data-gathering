@@ -155,7 +155,8 @@ function route_(req) {
     case 'setPassword': return setPassword_(req.password);
     case 'setCredentials': return setCredentials_(req.adminId, req.password);
     case 'setAdminId': return setAdminId_(req.newAdminId);
-    case 'listPublic': return listPublicCached_();
+    case 'listPublic': return listPublicCached_(req.key);
+    case 'rotateHomeKey': return { homeKey: rotateHomeKey_() };
     case 'getForm': return getForm_(req.id);
     case 'submit': return submit_(req.id, req.values);
     case 'login': return login_(req.name, req.hidden, req.withOwner);
@@ -250,7 +251,11 @@ function writeHeader_(sh, fields) {
 // ---------- 공개 API ----------
 
 // 선생님 화면이 20초마다 확인해도 시트를 매번 읽지 않도록, 결과를 잠깐 저장해 두고 돌려준다.
-function listPublicCached_() {
+function listPublicCached_(key) {
+  // 메인페이지 링크에 든 비밀 코드가 맞아야만 목록을 준다. (개별 응답 링크에서 ?f=... 를 지워도 목록을 볼 수 없게)
+  // 코드는 관리 화면을 처음 열 때 만들어지므로, 그 전에는 누구에게도 목록을 주지 않는다.
+  const stored = PropertiesService.getScriptProperties().getProperty('HOME_KEY');
+  if (!stored || String(key || '') !== stored) throw new Error('KEY');
   const cache = CacheService.getScriptCache();
   const hit = cache.get(PUBLIC_CACHE_KEY);
   if (hit) return JSON.parse(hit);
@@ -300,7 +305,25 @@ function setOwner_(name, hidden) {
 // 관리자 화면 첫 데이터: 양식 목록 (withOwner 이면 요구자 정보도 함께. 이전 화면은 배열만 받는다)
 function dashboard_(withOwner) {
   const forms = listForms_();
-  return withOwner ? { forms: forms, owner: getOwner_(), idSet: !!PropertiesService.getScriptProperties().getProperty('ADMIN_ID') } : forms;
+  return withOwner ? { forms: forms, owner: getOwner_(), idSet: !!PropertiesService.getScriptProperties().getProperty('ADMIN_ID'), homeKey: homeKey_() } : forms;
+}
+
+// 메인페이지(자료 목록) 링크의 비밀 코드. 없으면 만든다. (잠금 안에서 실행되는 관리자 요청에서만 부른다)
+function homeKey_() {
+  const props = PropertiesService.getScriptProperties();
+  let key = props.getProperty('HOME_KEY');
+  if (!key) { key = newHomeKey_(); props.setProperty('HOME_KEY', key); }
+  return key;
+}
+
+// 무작위 UUID에서 하이픈을 뺀 32자(무작위 122비트). 추측할 수 없는 값이어야 해서 양식 코드보다 훨씬 길게 만든다.
+function newHomeKey_() { return Utilities.getUuid().replace(/-/g, ''); }
+
+// 링크 갱신: 새 코드를 만든다. 이전 메인페이지 링크는 바로 쓸 수 없게 된다.
+function rotateHomeKey_() {
+  const key = newHomeKey_();
+  PropertiesService.getScriptProperties().setProperty('HOME_KEY', key);
+  return key;
 }
 
 // 관리자 로그인: 비밀번호 확인(doPost에서 처리) 후, 요구자 정보가 오면 저장하고 양식 목록을 돌려준다.

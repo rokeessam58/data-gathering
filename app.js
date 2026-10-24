@@ -13,7 +13,7 @@ function clearSession() { sessionStorage.removeItem(PW_KEY); sessionStorage.remo
 const LOADING_LABELS = {
   submit: '제출하는 중이에요', saveForm: '저장하는 중이에요', setOpen: '바꾸는 중이에요',
   deleteForm: '삭제하는 중이에요', deleteRow: '삭제하는 중이에요',
-  setPassword: '비밀번호를 설정하는 중이에요', login: '로그인하는 중이에요',
+  setPassword: '비밀번호를 설정하는 중이에요', login: '로그인하는 중이에요', rotateHomeKey: '링크를 갱신하는 중이에요',
 };
 const SLOW_AFTER_MS = 6000;   // 이 시간이 지나도 응답이 없으면 "서버를 깨우는 중" 안내를 덧붙인다.
 const SHOW_AFTER_MS = 800;    // 이 시간 안에 끝나는 요청에는 대기 창을 띄우지 않는다. (자주 뜨면 오히려 느리게 느껴진다)
@@ -232,20 +232,43 @@ async function rawApi(action, payload) {
       const wait = sec < 60 ? `${sec}초` : sec % 60 === 0 ? `${sec / 60}분` : `${Math.floor(sec / 60)}분 ${sec % 60}초`;
       throw Object.assign(new Error(`비밀번호를 여러 번 틀려서 로그인이 잠겼어요. ${wait} 뒤에 다시 시도해 주세요.`), { auth: true, locked: true });
     }
+    if (err === 'KEY') throw Object.assign(new Error('메인페이지 링크가 올바르지 않거나 새 링크로 바뀌었어요.'), { badKey: true });
     throw new Error(err);
   }
   return json.data;
 }
 
 const BASE = location.origin + location.pathname;
-function homeLink() { return backendUrl ? BASE + '?g=' + encodeURIComponent(backendRef(backendUrl)) : BASE; }
-function formLink(id) { return homeLink() + (backendUrl ? '&' : '?') + 'f=' + encodeURIComponent(id); }
+// 메인페이지 링크에는 비밀 코드(k)가 들어 있다. 개별 응답 링크에는 넣지 않으므로, 개별 링크에서 ?f=... 를 지워도 목록을 볼 수 없다.
+const urlKey = new URLSearchParams(location.search).get('k') || ''; // 선생님이 받은 메인페이지 링크의 코드
+let adminHomeKey = ''; // 관리자 화면이 서버에서 받은 코드
+function baseLink() { return backendUrl ? BASE + '?g=' + encodeURIComponent(backendRef(backendUrl)) : BASE; }
+function homeLink() {
+  const key = IS_ADMIN_PAGE ? adminHomeKey : urlKey;
+  return baseLink() + (key && backendUrl ? '&k=' + encodeURIComponent(key) : '');
+}
+function formLink(id) { return baseLink() + (backendUrl ? '&' : '?') + 'f=' + encodeURIComponent(id); }
+// 메인페이지 목록 요청. 링크에 든 코드를 함께 보낸다.
+const fetchPublicList = (opts) => api('listPublic', { key: urlKey }, opts);
 
 // 누구나 자기 서버를 연결할 수 있는 구조라, 가짜 링크로 개인정보를 빼내려는 시도에 대비해 선생님 화면에 안내를 둔다.
 function linkWarning() {
   return h('div', { class: 'warn', role: 'note' },
     '자료 요구자에게 직접 받은 링크인지 확인해 주세요. 모르는 사람이 보낸 링크라면 개인정보를 입력하지 마세요.');
 }
+
+// 메인페이지 링크가 없거나 틀렸을 때(개별 응답 링크에서 ?f=... 만 지운 경우 포함)와, 관리자가 링크를 갱신해 이전 링크가 막힌 경우
+function renderBadHomeLink() {
+  mount(h('h1', {}, '링크가 필요해요'),
+    h('div', { class: 'card' },
+      h('p', {}, '이 링크로는 자료 목록을 볼 수 없어요.'),
+      h('p', { class: 'muted' }, '자료 요구자에게 받은 링크로 접속해 주세요. 링크가 새로 바뀌었다면 새 링크를 다시 받아야 해요.')));
+}
+
+// 메인페이지에서 자료를 눌러 들어왔다면, 제출 화면의 취소 버튼이 이 주소(목록)로 돌아간다. 이 탭에서만 유지된다.
+const FROM_HOME_KEY = 'dg_from_home';
+function rememberHome() { try { sessionStorage.setItem(FROM_HOME_KEY, location.href); } catch (e) { /* 저장할 수 없으면 목록으로 돌아가지 못하고 창을 닫는 쪽으로 동작한다 */ } }
+function homeToReturn() { try { const u = sessionStorage.getItem(FROM_HOME_KEY); return u && u.startsWith(BASE) ? u : ''; } catch (e) { return ''; } }
 
 // ---------- 첫 화면: 제출할 자료 선택 ----------
 
@@ -279,10 +302,13 @@ function startHomePolling(onData) {
     if (document.visibilityState !== 'visible' || idle() || inflight) return schedule(); // 지금은 쉰다
     inflight = true;
     try {
-      const data = await api('listPublic', undefined, { quiet: true }); // 화면을 막는 대기 창 없이 조용히
+      const data = await fetchPublicList({ quiet: true }); // 화면을 막는 대기 창 없이 조용히
       fails = 0; lastOk = Date.now();
       if (!stopped) onData(data);
-    } catch (e) { fails++; } // 실패해도 알리지 않는다. 다음 주기에 다시 시도한다.
+    } catch (e) {
+      if (e.badKey && !stopped) return renderBadHomeLink(); // 관리자가 링크를 갱신했다면 안내 화면으로 바꾼다
+      fails++; // 실패해도 알리지 않는다. 다음 주기에 다시 시도한다.
+    }
     finally { inflight = false; schedule(); }
   }
   const wake = () => { // 조작이 있었음. 쉬고 있었다면 기다리지 않고 바로 확인한다.
@@ -317,7 +343,7 @@ const MANUAL_REFRESH_COOLDOWN_MS = 5000; // 새로고침 버튼을 연달아 눌
 async function renderHome() {
   if (!backendUrl) return renderNoBackend();
   let first;
-  try { first = readHome(await api('listPublic')); } catch (e) { return mount(h('div', { class: 'card' }, h('p', {}, e.message))); }
+  try { first = readHome(await fetchPublicList()); } catch (e) { return e.badKey ? renderBadHomeLink() : mount(h('div', { class: 'card' }, h('p', {}, e.message))); }
   if (!first) return mount(h('div', { class: 'card' }, h('p', {}, '서버 응답을 해석하지 못했습니다. 배포 URL을 확인하세요.')));
 
   const ownerEl = h('span', { class: 'owner' });
@@ -326,7 +352,7 @@ async function renderHome() {
     ownerEl.textContent = owner ? ownerText(owner) : '';
     ownerEl.hidden = !owner;
     listBox.replaceChildren(...(list.length
-      ? list.map((f) => h('a', { class: 'card pick', href: formLink(f.id) },
+      ? list.map((f) => h('a', { class: 'card pick', href: formLink(f.id), onclick: () => rememberHome() },
         h('strong', {}, f.title),
         f.description ? h('div', { class: 'muted pre' }, f.description) : ''))
       : [h('p', { class: 'muted' }, '현재 접수 중인 자료가 없습니다.')]));
@@ -354,11 +380,12 @@ async function renderHome() {
       if (Date.now() < cooldownUntil) return toast('방금 새로고침했어요. 잠시 후 다시 눌러 주세요');
       refreshing = true; refreshBtn.classList.add('busy'); refreshBtn.setAttribute('aria-busy', 'true');
       try {
-        const r = apply(await api('listPublic', undefined, { quiet: true }));
+        const r = apply(await fetchPublicList({ quiet: true }));
         if (r === null) throw new Error('서버 응답을 해석하지 못했습니다.');
         if (homePoll) homePoll.reset(); // 방금 확인했으니 다음 자동 확인은 1분 뒤부터
         toast(r === 'changed' ? '목록을 새로 불러왔어요' : '이미 최신 상태예요');
       } catch (e) {
+        if (e.badKey) return renderBadHomeLink();
         toast('새로고침하지 못했어요: ' + e.message);
       } finally {
         refreshing = false; cooldownUntil = Date.now() + MANUAL_REFRESH_COOLDOWN_MS;
@@ -419,7 +446,13 @@ async function renderRespondent(id) {
       });
       if (!leaveAnyway) return;
     }
-    location.href = homeLink();
+    const back = homeToReturn();
+    if (back) { location.href = back; return; } // 메인페이지에서 들어왔으면 목록으로
+    // 개별 링크로 들어왔으면 창을 닫는다. 브라우저가 닫지 못하게 하는 경우(링크를 새 창으로 연 게 아닐 때 등)에는 직접 닫도록 안내한다.
+    window.close();
+    setTimeout(() => mount(h('div', { class: 'card' },
+      h('h2', {}, '이 창을 닫아 주세요'),
+      h('p', { class: 'muted' }, '브라우저가 창을 자동으로 닫지 못했어요. 탭이나 창을 직접 닫아 주세요.'))), 300);
   }
 
   mount(h('div', { class: 'row between' }, h('h1', {}, form.title), h('button', { onclick: leave }, '← 취소')), form.description ? h('p', { class: 'muted', style: 'white-space:pre-wrap' }, form.description) : '',
@@ -551,7 +584,7 @@ let ownerDraft = null; // 로그인에 실패해 화면이 다시 그려져도 �
 // 서버 응답을 {forms, owner} 로 통일한다. (이전 서버는 양식 배열만 돌려준다)
 function normalizeDash(res) {
   if (Array.isArray(res)) { const p = loadProfile(); return { forms: res, owner: p ? { name: p.name, hidden: p.hidden } : null }; }
-  if (res && Array.isArray(res.forms)) return { forms: res.forms, owner: res.owner || null, idSet: res.idSet };
+  if (res && Array.isArray(res.forms)) return { forms: res.forms, owner: res.owner || null, idSet: res.idSet, homeKey: res.homeKey };
   return null;
 }
 
@@ -756,6 +789,7 @@ async function renderDashboard() {
   if (dash.idSet === false) return renderSetAdminId(); // 서버에 아이디가 없으면 먼저 정하게 한다 (이전 서버는 idSet 을 주지 않아 해당 없음)
   rememberOwner(owner);
   lastDash = dash;
+  if (dash.homeKey) adminHomeKey = dash.homeKey;
   const greeting = owner && owner.name ? `${owner.name} 선생님, 안녕하세요!` : '안녕하세요!';
 
   // ── 양식 카드: 누르면 화면을 먼저 바꾸고 서버에는 뒤에서 요청한다. (실패하면 되돌리고 알린다)
@@ -835,6 +869,8 @@ async function renderDashboard() {
     },
   });
 
+  const homeBox = linkBox(homeLink());
+  homeBox.append(homeLinkRefreshButton(homeBox));
   mount(
     h('div', { class: 'row between head-row' }, h('h1', {}, '자료 수합 관리'),
       h('div', { class: 'head-right' }, h('span', { class: 'greet' }, greeting), adminMenu())),
@@ -842,7 +878,7 @@ async function renderDashboard() {
       h('strong', {}, '메인페이지(수합 중인 자료 목록) 링크'),
       h('div', { class: 'muted' }, '응답을 받고 있는 모든 자료가 표시되는 페이지입니다.(숨긴 자료 제외)'),
       h('div', { class: 'muted' }, '하나의 링크로 여러 자료를 한 번에 수합하고 싶으신 경우, 이 링크를 공유하세요.'),
-      linkBox(homeLink())),
+      homeBox),
     h('hr', { class: 'divider' }),
     h('h2', { class: 'list-title' }, '자료 목록'),
     h('div', { class: 'row' },
@@ -1020,10 +1056,33 @@ function renderMyPage(serverOwner, adminId) {
     h('button', { class: 'primary', type: 'submit' }, '비밀번호 변경')));
 }
 
-function linkBox(url) {
+function linkBox(url, ...extra) {
   const link = h('input', { readonly: true, value: url, onfocus: (e) => e.target.select() });
   return h('div', { class: 'linkbox' }, link,
-    h('button', { class: 'sm', onclick: async () => { try { await navigator.clipboard.writeText(link.value); toast('링크를 복사했습니다'); } catch (e) { link.select(); toast('Ctrl+C로 복사하세요'); } } }, '링크 복사'));
+    h('button', { class: 'sm', onclick: async () => { try { await navigator.clipboard.writeText(link.value); toast('링크를 복사했습니다'); } catch (e) { link.select(); toast('Ctrl+C로 복사하세요'); } } }, '링크 복사'),
+    ...extra);
+}
+
+// 메인페이지 링크의 비밀 코드를 새로 만든다. 이전에 나눠 준 메인페이지 링크는 열리지 않게 되므로 먼저 되묻는다.
+function homeLinkRefreshButton(box) {
+  return h('button', {
+    class: 'sm danger', type: 'button',
+    onclick: () => guard(async () => {
+      const ok = await confirmModal({
+        title: '메인페이지 링크를 갱신할까요?',
+        desc: '새 링크가 만들어지고, 지금까지 공유한 메인페이지 링크는 더 이상 열리지 않아요. 선생님들께 새 링크를 다시 보내 주셔야 해요. 개별 응답 링크는 그대로 쓸 수 있어요.',
+        confirmText: '링크 갱신',
+        cancelText: '취소',
+        danger: true,
+      });
+      if (!ok) return;
+      const res = await api('rotateHomeKey');
+      adminHomeKey = res.homeKey;
+      if (lastDash) lastDash = { ...lastDash, homeKey: res.homeKey };
+      box.querySelector('input').value = homeLink();
+      toast('링크를 갱신했어요. 새 링크를 선생님들께 다시 보내 주세요');
+    }),
+  }, '링크 갱신');
 }
 
 // 눈 모양 아이콘 (공개 = 눈 뜸, 비공개 = 눈에 사선)
